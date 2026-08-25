@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -24,6 +24,7 @@ import {
   File,
   FileSpreadsheet,
   FileText,
+  FoldVertical,
   Folder,
   FolderOpen,
   FolderTree,
@@ -38,6 +39,7 @@ import {
   ListOrdered,
   ListTodo,
   ListTree,
+  LocateFixed,
   Lock,
   LockOpen,
   MessageSquareText,
@@ -53,11 +55,13 @@ import {
   Star,
   TerminalSquare,
   Text,
+  UnfoldVertical,
   Users,
   X,
 } from "lucide-react";
 import { initialWorkspace } from "./data";
 import { FileTree } from "./FileTree";
+import type { FileTreeHandle } from "./FileTree";
 import { loadWorkspace, saveWorkspace } from "./storage";
 import type { ContentNode, NoteBlock, WorkspaceState } from "./types";
 
@@ -187,18 +191,24 @@ function ProjectSidebar({
   onDeleteNodes: (ids: string[]) => void;
   onClose: () => void;
 }) {
+  const fileTreeRef = useRef<FileTreeHandle>(null);
+
   return (
     <section className="sidebar-pane primary">
-      <div className="panel-header">
+      <div className="panel-header project-panel-header">
         <FolderTree size={18} strokeWidth={1.7} />
         <strong>Project</strong>
         <ChevronDown size={14} />
         <div className="panel-header-actions">
+          <button aria-label="选中打开的文件" title="选中打开的文件" onClick={() => fileTreeRef.current?.revealSelected()}><LocateFixed size={15} /></button>
+          <button aria-label="展开所有目录" title="展开所有目录" onClick={() => fileTreeRef.current?.expandAll()}><UnfoldVertical size={15} /></button>
+          <button aria-label="收起所有目录" title="收起所有目录" onClick={() => fileTreeRef.current?.collapseAll()}><FoldVertical size={15} /></button>
           <button aria-label="新建页面" onClick={onCreatePage}><Plus size={15} /></button>
           <button aria-label="收起 Project 窗口" title="收起窗口" onClick={onClose}><Minus size={15} /></button>
         </div>
       </div>
       <FileTree
+        ref={fileTreeRef}
         nodes={workspace.nodes}
         selectedId={workspace.selectedNodeId}
         onSelect={onSelect}
@@ -273,7 +283,7 @@ function LeftActivityRail({
       <button className={primaryActive === "commit" ? "active" : ""} onClick={() => onPrimarySelect("commit")} aria-label="Commit" aria-pressed={primaryActive === "commit"}>
         <span>Commit</span><GitCommitHorizontal size={18} strokeWidth={1.5} />
       </button>
-      <button className={primaryActive === "pullRequests" ? "active" : ""} onClick={() => onPrimarySelect("pullRequests")} aria-label="PullRequests" aria-pressed={primaryActive === "pullRequests"}>
+      <button className={`pull-requests-button ${primaryActive === "pullRequests" ? "active" : ""}`} onClick={() => onPrimarySelect("pullRequests")} aria-label="PullRequests" aria-pressed={primaryActive === "pullRequests"}>
         <span>PullRequests</span><GitPullRequest size={18} strokeWidth={1.5} />
       </button>
       <div className="activity-rail-bottom">
@@ -673,7 +683,6 @@ function NoteView({
 }) {
   return (
     <article className={`note-page ${readOnly ? "read-only" : ""}`}>
-      <div className="note-meta"><span>产品设计</span><ChevronRight size={13} /><span>探索</span></div>
       <div className="note-title-row">
         <h1
           contentEditable={!readOnly}
@@ -681,12 +690,6 @@ function NoteView({
           suppressContentEditableWarning
           onBlur={(event) => onTitleChange(event.currentTarget.textContent?.trim() || "未命名")}
         >{node.title}</h1>
-      </div>
-      <div className="author-line">
-        <span className="mini-avatar">JL</span>
-        <span>Johli 创建</span>
-        <span className="dot">·</span>
-        <span>今天 10:24</span>
       </div>
       <div className="editor">
         <Suspense fallback={<div className="editor-loading">正在加载编辑器…</div>}>
@@ -785,6 +788,7 @@ function App() {
     : (workspace.blocks[selected.id] ?? []).filter((block) =>
         (block.kind === "heading1" || block.kind === "heading" || block.kind === "heading3") && block.content
       ).map((block) => ({ id: block.id, content: block.content ?? "" }));
+  const canvasPath = selected.kind === "page" ? outlineItems.slice(0, 2) : [];
 
   useEffect(() => {
     setCursorPosition({ line: 1, column: 1 });
@@ -1061,16 +1065,26 @@ function App() {
         </div>
         <div className="ide-toolbar">
           <div className="breadcrumbs" aria-label="当前位置">
-            <strong>HyperSpace</strong><ChevronRight size={13} /><span>{selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件"}</span><ChevronRight size={13} /><span>{selected.title}</span>
+            <strong>HyperSpace</strong>
+            <ChevronRight size={13} />
+            <span>{selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件"}</span>
+            <ChevronRight size={13} />
+            <span>{selected.title}</span>
+            {canvasPath.map((item) => (
+              <Fragment key={item.id}>
+                <ChevronRight size={13} />
+                <span>{item.content}</span>
+              </Fragment>
+            ))}
           </div>
           <div className="command-search">
-            <Search size={15} />
+            <Search size={13} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} onFocus={() => setBottomTool("search")} placeholder="搜索工作空间" />
-            <kbd><Command size={11} /> K</kbd>
+            <kbd><Command size={10} /> K</kbd>
           </div>
-          <div className={`toolbar-sync ${syncStatus}`}><Cloud size={15} /><span>{syncCopy}</span></div>
-          <button className="toolbar-primary" onClick={createPage}><Plus size={15} /> 新建页面</button>
-          <button className="toolbar-icon" aria-label="更多操作"><MoreHorizontal size={18} /></button>
+          <div className={`toolbar-sync ${syncStatus}`}><Cloud size={13} /><span>{syncCopy}</span></div>
+          <button className="toolbar-primary" onClick={createPage}><Plus size={13} /> 新建页面</button>
+          <button className="toolbar-icon" aria-label="更多操作"><MoreHorizontal size={15} /></button>
         </div>
       </header>
 

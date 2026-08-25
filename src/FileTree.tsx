@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -11,7 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Tree, adjustMoveIndex } from "react-arborist";
-import type { NodeRendererProps } from "react-arborist";
+import type { NodeRendererProps, TreeApi } from "react-arborist";
 import folderIcon from "./assets/icons/folder.svg";
 import noteIcon from "./assets/icons/note.svg";
 import type { ContentNode, NodeKind } from "./types";
@@ -28,6 +28,15 @@ interface FileTreeProps {
   onMove: (dragIds: string[], parentId: string | null, index: number) => void;
   onCreate: (kind: Extract<NodeKind, "page" | "folder">, parentId: string | null) => void;
   onDelete: (ids: string[]) => void;
+}
+
+const TREE_ROW_HEIGHT = 26;
+const TREE_INDENT = 16;
+
+export interface FileTreeHandle {
+  revealSelected: () => void;
+  expandAll: () => void;
+  collapseAll: () => void;
 }
 
 const RenameContext = createContext<{
@@ -228,15 +237,32 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
   );
 }
 
-export function FileTree({ nodes, selectedId, onSelect, onRename, onMove, onCreate, onDelete }: FileTreeProps) {
+export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
+  { nodes, selectedId, onSelect, onRename, onMove, onCreate, onDelete },
+  ref,
+) {
   const data = useMemo(() => toTree(nodes), [nodes]);
   const [containerRef, height] = useElementHeight<HTMLDivElement>();
+  const treeRef = useRef<TreeApi<FileTreeNode> | undefined>(undefined);
   const [workspaceOpen, setWorkspaceOpen] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [pointerDragState, setPointerDragState] = useState<PointerDragState | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const suppressClickUntil = useRef(0);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  const runWhenTreeIsVisible = useCallback((action: (tree: TreeApi<FileTreeNode>) => void) => {
+    setWorkspaceOpen(true);
+    window.requestAnimationFrame(() => {
+      if (treeRef.current) action(treeRef.current);
+    });
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    revealSelected: () => runWhenTreeIsVisible((tree) => { void tree.scrollTo(selectedId, "center"); }),
+    expandAll: () => runWhenTreeIsVisible((tree) => tree.openAll()),
+    collapseAll: () => treeRef.current?.closeAll(),
+  }), [runWhenTreeIsVisible, selectedId]);
 
   const renameContext = useMemo(() => ({
     editingId,
@@ -427,7 +453,7 @@ export function FileTree({ nodes, selectedId, onSelect, onRename, onMove, onCrea
         <TreeAssetIcon src={folderIcon} />
         <span className="tree-label">HyperSpace</span>
       </button>
-      {workspaceOpen && height > 30 && (
+      {workspaceOpen && height > TREE_ROW_HEIGHT && (
         <RenameContext.Provider value={renameContext}>
           <PointerDragContext.Provider value={pointerDragContext}>
           <div
@@ -447,11 +473,12 @@ export function FileTree({ nodes, selectedId, onSelect, onRename, onMove, onCrea
             }}
           >
             <Tree<FileTreeNode>
+              ref={treeRef}
               data={data}
               width="100%"
-              height={height - 30}
-              rowHeight={30}
-              indent={18}
+              height={height - TREE_ROW_HEIGHT}
+              rowHeight={TREE_ROW_HEIGHT}
+              indent={TREE_INDENT}
               paddingTop={2}
               paddingBottom={12}
               selection={selectedId}
@@ -503,4 +530,4 @@ export function FileTree({ nodes, selectedId, onSelect, onRename, onMove, onCrea
       )}
     </div>
   );
-}
+});
