@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   BlockNoteSchema,
   combineByGroup,
@@ -38,13 +39,19 @@ import {
   useEditorState,
 } from "@blocknote/react";
 import {
+  ClipboardPaste,
+  Copy,
   FileText,
   FolderOpen,
   Highlighter,
+  Link2,
   MoreHorizontal,
+  Plus,
+  Scissors,
   Sigma,
   Subscript,
   Superscript,
+  Trash2,
 } from "lucide-react";
 import type { ContentNode, NoteBlock } from "./types";
 
@@ -404,6 +411,147 @@ function migrateLegacyBlocks(blocks: NoteBlock[]): unknown[] {
   return migrated.length > 0 ? migrated : [{ type: "paragraph" }];
 }
 
+
+function clampCanvasMenuPosition(x: number, y: number, width = 200, height = 250) {
+  const pad = 8;
+  return {
+    x: Math.max(pad, Math.min(x, window.innerWidth - width - pad)),
+    y: Math.max(pad, Math.min(y, window.innerHeight - height - pad)),
+  };
+}
+
+function CanvasContextMenu({ readOnly }: { readOnly: boolean }) {
+  const editor = useBlockNoteEditor<any, any, any>();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const hasTextSelection = Boolean(editor.getSelectedText());
+  const selectedLink = editor.getSelectedLinkUrl();
+
+  useEffect(() => {
+    const root = editor.prosemirrorView?.dom.closest(".workspace-canvas")
+      ?? editor.prosemirrorView?.dom.closest(".note-page")
+      ?? editor.prosemirrorView?.dom.closest(".hyperspace-blocknote")
+      ?? editor.prosemirrorView?.dom.parentElement;
+    if (!root) return;
+
+    const onContextMenu = (event: Event) => {
+      const mouseEvent = event as MouseEvent;
+      mouseEvent.preventDefault();
+      mouseEvent.stopPropagation();
+      if (readOnly) return;
+      const next = clampCanvasMenuPosition(mouseEvent.clientX, mouseEvent.clientY);
+      setMenu(next);
+    };
+
+    root.addEventListener("contextmenu", onContextMenu);
+    return () => root.removeEventListener("contextmenu", onContextMenu);
+  }, [editor, readOnly]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event: MouseEvent) => {
+      if ((event.target as Element).closest?.(".canvas-context-menu")) return;
+      setMenu(null);
+    };
+    const closeSoon = () => setMenu(null);
+    window.addEventListener("mousedown", close);
+    window.addEventListener("scroll", closeSoon, true);
+    window.addEventListener("resize", closeSoon);
+    window.addEventListener("keydown", closeSoon);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", closeSoon, true);
+      window.removeEventListener("resize", closeSoon);
+      window.removeEventListener("keydown", closeSoon);
+    };
+  }, [menu]);
+
+  if (!menu || readOnly) return null;
+
+  function runClipboard(command: "cut" | "copy" | "paste") {
+    editor.focus();
+    document.execCommand(command);
+    setMenu(null);
+  }
+
+  async function pasteFromClipboard() {
+    editor.focus();
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) editor.pasteText(text);
+      else document.execCommand("paste");
+    } catch {
+      document.execCommand("paste");
+    }
+    setMenu(null);
+  }
+
+  function duplicateBlock() {
+    const block = editor.getTextCursorPosition().block;
+    editor.insertBlocks(
+      [{
+        type: block.type,
+        props: block.props,
+        content: block.content,
+        children: block.children,
+      }],
+      block,
+      "after",
+    );
+    setMenu(null);
+  }
+
+  function deleteBlocks() {
+    const selection = editor.getSelection();
+    const blocks = selection?.blocks?.length
+      ? selection.blocks
+      : [editor.getTextCursorPosition().block];
+    editor.removeBlocks(blocks);
+    setMenu(null);
+  }
+
+  function insertBlock() {
+    editor.focus();
+    editor._tiptapEditor.commands.insertContent("/");
+    setMenu(null);
+  }
+
+  function editLink() {
+    const current = editor.getSelectedLinkUrl() ?? "https://";
+    const url = window.prompt("链接地址", current)?.trim();
+    if (!url) {
+      setMenu(null);
+      return;
+    }
+    editor.createLink(url);
+    setMenu(null);
+  }
+
+  return createPortal(
+    <div
+      className="tree-context-menu canvas-context-menu is-pointer"
+      role="menu"
+      style={{ top: menu.y, left: menu.x }}
+      onMouseDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <button role="menuitem" onClick={() => runClipboard("cut")}><Scissors size={14} />剪切 <kbd>⌘X</kbd></button>
+      <button role="menuitem" onClick={() => runClipboard("copy")}><Copy size={14} />复制 <kbd>⌘C</kbd></button>
+      <button role="menuitem" onClick={() => { void pasteFromClipboard(); }}><ClipboardPaste size={14} />粘贴 <kbd>⌘V</kbd></button>
+      <span className="tree-menu-separator" />
+      <button role="menuitem" onClick={duplicateBlock}><Copy size={14} />复制块</button>
+      <button className="danger" role="menuitem" onClick={deleteBlocks}><Trash2 size={14} />删除块 <kbd>⌫</kbd></button>
+      <span className="tree-menu-separator" />
+      <button role="menuitem" onClick={insertBlock}><Plus size={14} />插入块 <kbd>/</kbd></button>
+      <button
+        role="menuitem"
+        disabled={!hasTextSelection && !selectedLink}
+        onClick={editLink}
+      ><Link2 size={14} />{selectedLink ? "编辑链接" : "添加链接"}</button>
+    </div>,
+    document.body,
+  );
+}
+
 export function HyperSpaceBlockEditor({
   pageId,
   nodes,
@@ -411,13 +559,15 @@ export function HyperSpaceBlockEditor({
   legacyBlocks,
   readOnly,
   onChange,
+  onActiveBlockChange,
 }: {
   pageId: string;
   nodes: ContentNode[];
   initialDocument?: unknown[];
   legacyBlocks: NoteBlock[];
   readOnly: boolean;
-  onChange: (document: unknown[]) => void;
+  onChange: (document: unknown[], markdown: string) => void;
+  onActiveBlockChange?: (blockId: string | null) => void;
 }) {
   const initialContent = useMemo(
     () => (initialDocument?.length ? initialDocument : migrateLegacyBlocks(legacyBlocks)),
@@ -437,12 +587,36 @@ export function HyperSpaceBlockEditor({
   }, [pageId]);
   const migratedPageRef = useRef<string | null>(null);
 
+  const emitChange = () => {
+    onChange(
+      editor.document as unknown[],
+      editor.blocksToMarkdownLossy(editor.document),
+    );
+  };
+
   useEffect(() => {
     if (!initialDocument && migratedPageRef.current !== pageId) {
       migratedPageRef.current = pageId;
-      onChange(editor.document as unknown[]);
+      emitChange();
     }
   }, [editor, initialDocument, onChange, pageId]);
+
+  useEffect(() => {
+    if (!onActiveBlockChange) return;
+
+    const reportActiveBlock = () => {
+      try {
+        const selection = editor.getSelection();
+        const block = selection?.blocks[0] ?? editor.getTextCursorPosition().block;
+        onActiveBlockChange(block.id);
+      } catch {
+        onActiveBlockChange(null);
+      }
+    };
+
+    reportActiveBlock();
+    return editor.onSelectionChange(reportActiveBlock);
+  }, [editor, onActiveBlockChange]);
 
   return (
     <WorkspaceNodesContext.Provider value={nodes}>
@@ -453,8 +627,9 @@ export function HyperSpaceBlockEditor({
         theme="light"
         formattingToolbar={false}
         slashMenu={false}
-        onChange={() => onChange(editor.document as unknown[])}
+        onChange={emitChange}
       >
+        <CanvasContextMenu readOnly={readOnly} />
         <FormattingToolbarController formattingToolbar={HyperSpaceFormattingToolbar} />
         <SuggestionMenuController
           triggerCharacter="/"

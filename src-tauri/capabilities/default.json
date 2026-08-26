@@ -1,11 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the HyperSpace main window",
-  "windows": ["main"],
+  "description": "Default capabilities for HyperSpace windows",
+  "windows": ["main", "new-project", "project-settings"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "deep-link:default"
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-center",
+    "core:window:allow-set-title",
+    "deep-link:default",
+    "dialog:default"
   ]
 }

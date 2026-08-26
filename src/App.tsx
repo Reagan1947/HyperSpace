@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -11,23 +11,27 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import "highlight.js/styles/github.css";
 import folderMenuIcon from "./assets/icons/folder-menu.svg";
+import projectIcon from "./assets/icons/project.svg";
+import structureOverviewIcon from "./assets/icons/structure-overview.svg";
 import {
+  Bell,
   Bookmark,
   Bot,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleHelp,
   Clock3,
   Cloud,
   Code2,
-  Command,
   File,
+  Files,
   FileSpreadsheet,
   FileText,
-  FoldVertical,
+  FileUp,
   Folder,
   FolderOpen,
-  FolderTree,
+  FoldVertical,
   GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
@@ -45,14 +49,17 @@ import {
   MessageSquareText,
   Minus,
   MoreHorizontal,
+  MoreVertical,
   Paperclip,
   Plus,
   Quote,
+  RefreshCw,
   Search,
   Server,
   SlidersHorizontal,
   Sparkles,
   Star,
+  Tag,
   TerminalSquare,
   Text,
   UnfoldVertical,
@@ -62,14 +69,28 @@ import {
 import { initialWorkspace } from "./data";
 import { FileTree } from "./FileTree";
 import type { FileTreeHandle } from "./FileTree";
-import { loadWorkspace, saveWorkspace } from "./storage";
-import type { ContentNode, NoteBlock, WorkspaceState } from "./types";
+import { TerminalPanel } from "./TerminalPanel";
+import { PROJECT_CREATED_EVENT, type ProjectCreatedPayload } from "./NewProjectDialog";
+import {
+  commitAll,
+  getCurrentProject,
+  getGitRepositoryInfo,
+  importPdf,
+  loadWorkspace,
+  projectNameFromPath,
+  saveWorkspace,
+  searchWorkspace,
+  type GitRepositoryInfo,
+  type WorkspaceSearchResult,
+} from "./storage";
+import type { ContentNode, MarkerColor, NoteBlock, TagDefinition, WorkspaceState } from "./types";
 
 type SyncStatus = "loading" | "saved" | "saving" | "offline";
 type PrimaryLeftTool = "project" | "commit" | "pullRequests";
 type SecondaryLeftTool = "structure" | "bookmarks";
 type BottomTool = "search";
 type SecondaryBottomTool = "git" | "terminal" | "todo" | "services";
+type RightTool = "notifications" | "references" | "ai";
 
 const HyperSpaceBlockEditor = lazy(() => import("./BlockEditor").then((module) => ({ default: module.HyperSpaceBlockEditor })));
 
@@ -84,6 +105,22 @@ hljs.registerLanguage("css", css);
 hljs.registerLanguage("sql", sql);
 
 const cloneInitial = () => structuredClone(initialWorkspace);
+
+const emptyGitInfo: GitRepositoryInfo = {
+  gitAvailable: false,
+  isRepository: false,
+  lfsAvailable: false,
+  branch: "",
+  changes: [],
+  history: [],
+};
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 function NodeIcon({ node, size = 16 }: { node: ContentNode; size?: number }) {
   if (node.kind === "folder") return <Folder size={size} strokeWidth={1.8} />;
@@ -174,33 +211,158 @@ function focusEditorBlock(blockId: string, position: "start" | "end" = "start") 
 
 function ProjectSidebar({
   workspace,
+  treeSelectedId,
+  activeNodeId,
+  projectName,
+  projectPath,
   onSelect,
+  onRevealActive,
   onCreatePage,
   onCreateNode,
   onRenameNode,
+  onSetNodeMarkerColor,
+  onSetNodeTags,
+  onCreateTag,
+  onDeleteTag,
   onMoveNodes,
   onDeleteNodes,
   onClose,
 }: {
   workspace: WorkspaceState;
+  treeSelectedId: string;
+  activeNodeId: string;
+  projectName: string;
+  projectPath: string | null;
   onSelect: (id: string) => void;
+  onRevealActive: () => void;
   onCreatePage: () => void;
   onCreateNode: (kind: "page" | "folder", parentId: string | null) => void;
   onRenameNode: (id: string, title: string) => void;
+  onSetNodeMarkerColor: (id: string, color?: MarkerColor) => void;
+  onSetNodeTags: (id: string, tagIds: string[]) => void;
+  onCreateTag: (nodeId: string, name: string) => void;
+  onDeleteTag: (tagId: string) => void;
   onMoveNodes: (ids: string[], parentId: string | null, index: number) => void;
   onDeleteNodes: (ids: string[]) => void;
   onClose: () => void;
 }) {
   const fileTreeRef = useRef<FileTreeHandle>(null);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [treeFilter, setTreeFilter] = useState<"notes" | "files" | null>(null);
+  const [tagFilterIds, setTagFilterIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!filterMenuOpen) return;
+
+    const closeMenu = (event: MouseEvent) => {
+      if (filterMenuRef.current?.contains(event.target as Node)) return;
+      setFilterMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterMenuOpen(false);
+    };
+
+    window.addEventListener("mousedown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("mousedown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [filterMenuOpen]);
+
+  function toggleTreeFilter(filter: Exclude<typeof treeFilter, null>) {
+    setTreeFilter((current) => current === filter ? null : filter);
+    setFilterMenuOpen(false);
+  }
+
+  function toggleTagFilter(tagId: string) {
+    setTagFilterIds((current) => current.includes(tagId)
+      ? current.filter((id) => id !== tagId)
+      : [...current, tagId]);
+  }
+
+  useEffect(() => {
+    const availableTagIds = new Set((workspace.tags ?? []).map((tag) => tag.id));
+    setTagFilterIds((current) => current.filter((id) => availableTagIds.has(id)));
+  }, [workspace.tags]);
 
   return (
     <section className="sidebar-pane primary">
       <div className="panel-header project-panel-header">
-        <FolderTree size={18} strokeWidth={1.7} />
-        <strong>Project</strong>
-        <ChevronDown size={14} />
+        <div className="project-filter-control" ref={filterMenuRef}>
+          <button
+            className={`project-filter-trigger ${filterMenuOpen ? "open" : ""}`}
+            type="button"
+            aria-label="筛选 Project 文件树"
+            aria-haspopup="menu"
+            aria-expanded={filterMenuOpen}
+            onClick={() => setFilterMenuOpen((open) => !open)}
+          >
+            <img className="project-panel-icon" src={projectIcon} alt="" aria-hidden="true" />
+            <strong>Project</strong>
+            {tagFilterIds.length > 0 && <span className="project-filter-count">{tagFilterIds.length}</span>}
+            <ChevronDown size={14} />
+          </button>
+          {filterMenuOpen && (
+            <div className="project-filter-menu" role="menu" aria-label="Project 展示筛选">
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={treeFilter === "notes"}
+                onClick={() => toggleTreeFilter("notes")}
+              >
+                <span className="project-filter-check">{treeFilter === "notes" && <Check size={13} />}</span>
+                <FileText size={14} />
+                仅展示笔记
+              </button>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={treeFilter === "files"}
+                onClick={() => toggleTreeFilter("files")}
+              >
+                <span className="project-filter-check">{treeFilter === "files" && <Check size={13} />}</span>
+                <File size={14} />
+                仅展示文件
+              </button>
+              {(workspace.tags?.length ?? 0) > 0 && (
+                <>
+                  <span className="project-filter-separator" />
+                  <div className="project-filter-section-title"><Tag size={12} />按标签筛选</div>
+                  <div className="project-tag-filters">
+                    {workspace.tags?.map((tag) => (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={tagFilterIds.includes(tag.id)}
+                        onClick={() => toggleTagFilter(tag.id)}
+                      >
+                        <span className="project-filter-check">{tagFilterIds.includes(tag.id) && <Check size={13} />}</span>
+                        <span>{tag.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {tagFilterIds.length > 0 && (
+                    <button className="project-filter-clear" type="button" onClick={() => setTagFilterIds([])}>
+                      <X size={12} />清除标签筛选
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
         <div className="panel-header-actions">
-          <button aria-label="选中打开的文件" title="选中打开的文件" onClick={() => fileTreeRef.current?.revealSelected()}><LocateFixed size={15} /></button>
+          <button
+            aria-label="选中打开的文件"
+            title="选中打开的文件"
+            onClick={() => {
+              onRevealActive();
+              fileTreeRef.current?.revealNode(activeNodeId);
+            }}
+          ><LocateFixed size={15} /></button>
           <button aria-label="展开所有目录" title="展开所有目录" onClick={() => fileTreeRef.current?.expandAll()}><UnfoldVertical size={15} /></button>
           <button aria-label="收起所有目录" title="收起所有目录" onClick={() => fileTreeRef.current?.collapseAll()}><FoldVertical size={15} /></button>
           <button aria-label="新建页面" onClick={onCreatePage}><Plus size={15} /></button>
@@ -210,10 +372,19 @@ function ProjectSidebar({
       <FileTree
         ref={fileTreeRef}
         nodes={workspace.nodes}
-        selectedId={workspace.selectedNodeId}
+        selectedId={treeSelectedId}
+        projectName={projectName}
+        projectPath={projectPath}
+        filter={treeFilter}
+        tagFilterIds={tagFilterIds}
+        tags={workspace.tags ?? []}
         onSelect={onSelect}
         onCreate={onCreateNode}
         onRename={onRenameNode}
+        onSetMarkerColor={onSetNodeMarkerColor}
+        onSetTags={onSetNodeTags}
+        onCreateTag={onCreateTag}
+        onDeleteTag={onDeleteTag}
         onMove={onMoveNodes}
         onDelete={onDeleteNodes}
       />
@@ -221,10 +392,13 @@ function ProjectSidebar({
   );
 }
 
-function ToolSidebar({ tool, outlineItems, bookmarks, onSelectNode, onClose }: {
+function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRefreshGit, onSelectNode, onClose }: {
   tool: Exclude<PrimaryLeftTool, "project"> | SecondaryLeftTool;
   outlineItems: { id: string; content: string }[];
   bookmarks: ContentNode[];
+  gitInfo?: GitRepositoryInfo;
+  gitLoading?: boolean;
+  onRefreshGit?: () => void;
   onSelectNode: (id: string) => void;
   onClose: () => void;
 }) {
@@ -238,6 +412,7 @@ function ToolSidebar({ tool, outlineItems, bookmarks, onSelectNode, onClose }: {
 
   const hasStructure = tool === "structure" && outlineItems.length > 0;
   const hasBookmarks = tool === "bookmarks" && bookmarks.length > 0;
+  const isCommit = tool === "commit";
   const panePosition = tool === "structure" || tool === "bookmarks" ? "secondary" : "primary";
   return (
     <section className={`sidebar-pane ${panePosition}`}>
@@ -246,7 +421,27 @@ function ToolSidebar({ tool, outlineItems, bookmarks, onSelectNode, onClose }: {
         <strong>{config.title}</strong>
         <button aria-label={`收起 ${config.title} 窗口`} title="收起窗口" onClick={onClose}><Minus size={15} /></button>
       </div>
-      {hasStructure ? (
+      {isCommit ? (
+        <div className="git-sidebar-details">
+          <div className="git-capability-row">
+            <span>{gitInfo?.isRepository ? gitInfo.branch || "HEAD" : "未启用 Git"}</span>
+            <button type="button" onClick={onRefreshGit} disabled={gitLoading} title="刷新 Git 状态"><RefreshCw size={13} /></button>
+          </div>
+          {!gitInfo?.gitAvailable ? (
+            <div className="git-sidebar-content"><GitBranch size={24} /><span>未检测到 Git</span></div>
+          ) : !gitInfo.isRepository ? (
+            <div className="git-sidebar-content"><GitBranch size={24} /><span>当前项目尚未启用 Git</span></div>
+          ) : gitInfo.changes.length > 0 ? (
+            <div className="git-change-list">
+              {gitInfo.changes.map((change, index) => (
+                <div key={`${change.path}-${index}`}><code>{change.status}</code><span>{change.path}</span></div>
+              ))}
+            </div>
+          ) : (
+            <div className="git-sidebar-content"><Check size={24} /><span>工作树干净</span></div>
+          )}
+        </div>
+      ) : hasStructure ? (
         <div className="sidebar-tool-list">
           {outlineItems.map((item) => <button key={item.id}><Hash size={14} /><span>{item.content}</span></button>)}
         </div>
@@ -288,7 +483,7 @@ function LeftActivityRail({
       </button>
       <div className="activity-rail-bottom">
         <button className={secondaryActive === "structure" ? "active" : ""} onClick={() => onSecondarySelect("structure")} aria-label="Structure" aria-pressed={secondaryActive === "structure"}>
-          <span>Structure</span><ListTree size={18} strokeWidth={1.5} />
+          <span>Structure</span><img className="activity-menu-icon structure-menu-icon" src={structureOverviewIcon} alt="" aria-hidden="true" />
         </button>
         <button className={secondaryActive === "bookmarks" ? "active" : ""} onClick={() => onSecondarySelect("bookmarks")} aria-label="Bookmarks" aria-pressed={secondaryActive === "bookmarks"}>
           <span>Bookmarks</span><Bookmark size={18} strokeWidth={1.5} />
@@ -302,19 +497,19 @@ function RightActivityRail({
   active,
   onSelect,
 }: {
-  active: "info" | "outline" | "ai" | null;
-  onSelect: (tool: "info" | "outline" | "ai") => void;
+  active: RightTool | null;
+  onSelect: (tool: RightTool) => void;
 }) {
   return (
     <nav className="activity-rail right" aria-label="辅助工具栏">
-      <button className={active === "info" ? "active" : ""} onClick={() => onSelect("info")} aria-label="Page Info">
-        <span>Info</span><SlidersHorizontal size={18} strokeWidth={1.5} />
+      <button className={active === "notifications" ? "active" : ""} onClick={() => onSelect("notifications")} aria-label="Notification" aria-pressed={active === "notifications"}>
+        <Bell size={18} strokeWidth={1.5} /><span>Notification</span>
       </button>
-      <button className={active === "outline" ? "active" : ""} onClick={() => onSelect("outline")} aria-label="Outline">
-        <span>Outline</span><ListTree size={18} strokeWidth={1.5} />
+      <button className={`referenced-files-button ${active === "references" ? "active" : ""}`} onClick={() => onSelect("references")} aria-label="Referenced Files" aria-pressed={active === "references"}>
+        <Files size={18} strokeWidth={1.5} /><span>Referenced Files</span>
       </button>
-      <button className={active === "ai" ? "active" : ""} onClick={() => onSelect("ai")} aria-label="AI Assistant">
-        <span>AI</span><Bot size={18} strokeWidth={1.5} />
+      <button className={active === "ai" ? "active" : ""} onClick={() => onSelect("ai")} aria-label="AI Chat" aria-pressed={active === "ai"}>
+        <Bot size={18} strokeWidth={1.5} /><span>AI Chat</span>
       </button>
     </nav>
   );
@@ -674,12 +869,14 @@ function NoteView({
   readOnly,
   onTitleChange,
   onDocumentChange,
+  onActiveBlockChange,
 }: {
   node: ContentNode;
   workspace: WorkspaceState;
   readOnly: boolean;
   onTitleChange: (title: string) => void;
-  onDocumentChange: (document: unknown[]) => void;
+  onDocumentChange: (document: unknown[], markdown: string) => void;
+  onActiveBlockChange?: (blockId: string | null) => void;
 }) {
   return (
     <article className={`note-page ${readOnly ? "read-only" : ""}`}>
@@ -701,6 +898,7 @@ function NoteView({
             legacyBlocks={workspace.blocks[node.id] ?? []}
             readOnly={readOnly}
             onChange={onDocumentChange}
+            onActiveBlockChange={onActiveBlockChange}
           />
         </Suspense>
       </div>
@@ -713,10 +911,20 @@ function EmptyView({ node }: { node: ContentNode }) {
     <div className="empty-view">
       <span><NodeIcon node={node} size={30} /></span>
       <h1>{node.title}</h1>
-      <p>{node.kind === "folder" ? "在这个文件夹中创建笔记或添加文件。" : "该文件将在桌面端安全打开。"}</p>
+      <p>{node.kind === "folder" ? "在这个文件夹中创建笔记或添加文件。" : node.localPath || "该文件将在桌面端安全打开。"}</p>
+      {node.kind === "file" && node.fileType === "PDF" && (
+        <small>{node.lfsTracked ? "Git LFS 已跟踪" : "本地文件（未启用 Git LFS）"}</small>
+      )}
       <button><Plus size={16} /> 新建内容</button>
     </div>
   );
+}
+
+function getBlockPlainText(content: unknown) {
+  if (Array.isArray(content)) {
+    return content.map((part) => part && typeof part === "object" && "text" in part ? String(part.text) : "").join("");
+  }
+  return typeof content === "string" ? content : "";
 }
 
 function getDocumentOutline(document: unknown[] | undefined) {
@@ -727,9 +935,7 @@ function getDocumentOutline(document: unknown[] | undefined) {
       if (!value || typeof value !== "object") continue;
       const block = value as { id?: unknown; type?: unknown; content?: unknown; children?: unknown };
       if (block.type === "heading") {
-        const content = Array.isArray(block.content)
-          ? block.content.map((part) => part && typeof part === "object" && "text" in part ? String(part.text) : "").join("")
-          : typeof block.content === "string" ? block.content : "";
+        const content = getBlockPlainText(block.content);
         if (content) items.push({ id: typeof block.id === "string" ? block.id : `heading-${items.length}`, content });
       }
       if (Array.isArray(block.children)) visit(block.children);
@@ -739,27 +945,526 @@ function getDocumentOutline(document: unknown[] | undefined) {
   return items;
 }
 
+function getCanvasPathForBlock(document: unknown[] | undefined, activeBlockId: string | null) {
+  if (!document || !activeBlockId) return [];
+
+  type HeadingCrumb = { id: string; content: string; level: number };
+  let headings: HeadingCrumb[] = [];
+  let result: { id: string; content: string }[] = [];
+  let found = false;
+
+  const visit = (blocks: unknown[]) => {
+    for (const value of blocks) {
+      if (found || !value || typeof value !== "object") continue;
+      const block = value as {
+        id?: unknown;
+        type?: unknown;
+        content?: unknown;
+        children?: unknown;
+        props?: { level?: unknown };
+      };
+      const blockId = typeof block.id === "string" ? block.id : null;
+
+      if (block.type === "heading") {
+        const level = typeof block.props?.level === "number" ? block.props.level : 1;
+        const content = getBlockPlainText(block.content);
+        headings = headings.filter((item) => item.level < level);
+        if (content) {
+          headings = [...headings, { id: blockId ?? `heading-${headings.length}`, content, level }];
+        }
+      }
+
+      if (blockId === activeBlockId) {
+        result = headings.map(({ id, content }) => ({ id, content }));
+        found = true;
+        return;
+      }
+
+      if (Array.isArray(block.children)) visit(block.children);
+    }
+  };
+
+  visit(document);
+  return result;
+}
+
+
+function getHeadingSiblings(document: unknown[] | undefined, headingId: string) {
+  if (!document) return [];
+
+  type HeadingItem = { id: string; content: string; level: number; parentId: string | null };
+  const headings: HeadingItem[] = [];
+  let stack: HeadingItem[] = [];
+
+  const visit = (blocks: unknown[]) => {
+    for (const value of blocks) {
+      if (!value || typeof value !== "object") continue;
+      const block = value as {
+        id?: unknown;
+        type?: unknown;
+        content?: unknown;
+        children?: unknown;
+        props?: { level?: unknown };
+      };
+      if (block.type === "heading") {
+        const level = typeof block.props?.level === "number" ? block.props.level : 1;
+        const content = getBlockPlainText(block.content);
+        const id = typeof block.id === "string" ? block.id : `heading-${headings.length}`;
+        stack = stack.filter((item) => item.level < level);
+        const item = { id, content, level, parentId: stack.at(-1)?.id ?? null };
+        if (content) headings.push(item);
+        stack = [...stack, item];
+      }
+      if (Array.isArray(block.children)) visit(block.children);
+    }
+  };
+
+  visit(document);
+  const target = headings.find((item) => item.id === headingId);
+  if (!target) return [];
+  return headings
+    .filter((item) => item.level === target.level && item.parentId === target.parentId)
+    .map(({ id, content }) => ({ id, content }));
+}
+
+function focusCanvasBlock(blockId: string) {
+  const selectors = [
+    `.bn-block-outer[data-id="${blockId}"]`,
+    `[data-id="${blockId}"]`,
+    `#${CSS.escape(blockId)}`,
+  ];
+  for (const selector of selectors) {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (element) {
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+  }
+}
+
+
+function WorkspaceTabBar({
+  tabs,
+  activeId,
+  onSelect,
+  onClose,
+  onOpenInfo,
+}: {
+  tabs: ContentNode[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+  onOpenInfo: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const measureRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const overflowRef = useRef<HTMLDivElement>(null);
+  const [hiddenIds, setHiddenIds] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const measure = () => {
+      const actionWidth = 36;
+      const spacerMin = 20;
+      const overflowBtnWidth = 28;
+      const widths = tabs.map((tab) => measureRefs.current.get(tab.id)?.offsetWidth ?? 120);
+      const total = widths.reduce((sum, width) => sum + width, 0);
+      const baseAvailable = Math.max(0, container.clientWidth - actionWidth - spacerMin);
+      const needsOverflow = total > baseAvailable + 0.5;
+      const available = Math.max(0, baseAvailable - (needsOverflow ? overflowBtnWidth : 0));
+
+      const ids = tabs.map((tab) => tab.id);
+      const widthOf = Object.fromEntries(ids.map((id, index) => [id, widths[index]]));
+      let visible: string[] = [];
+      let used = 0;
+      for (const id of ids) {
+        const width = widthOf[id] ?? 120;
+        if (used + width <= available + 0.5) {
+          visible.push(id);
+          used += width;
+        } else {
+          break;
+        }
+      }
+
+      if (activeId && ids.includes(activeId) && !visible.includes(activeId)) {
+        visible.push(activeId);
+        used += widthOf[activeId] ?? 120;
+        while (visible.length > 1 && used > available + 0.5) {
+          const removed = visible.shift();
+          if (!removed || removed === activeId) {
+            if (removed) visible.unshift(removed);
+            break;
+          }
+          used -= widthOf[removed] ?? 120;
+        }
+        visible = ids.filter((id) => visible.includes(id));
+      }
+
+      const nextHidden = ids.filter((id) => !visible.includes(id));
+      setHiddenIds((current) => {
+        if (current.length === nextHidden.length && current.every((id, index) => id === nextHidden[index])) {
+          return current;
+        }
+        return nextHidden;
+      });
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [tabs, activeId]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!overflowRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [activeId, tabs.length]);
+
+  const hiddenSet = useMemo(() => new Set(hiddenIds), [hiddenIds]);
+  const hiddenTabs = useMemo(
+    () => tabs.filter((tab) => hiddenSet.has(tab.id)),
+    [tabs, hiddenSet],
+  );
+
+  return (
+    <div className="workspace-tabs" ref={containerRef} role="tablist" aria-label="打开的页面">
+      <div className="workspace-tabs-measure" aria-hidden="true">
+        {tabs.map((tab) => (
+          <button
+            key={`measure-${tab.id}`}
+            ref={(element) => {
+              if (element) measureRefs.current.set(tab.id, element);
+              else measureRefs.current.delete(tab.id);
+            }}
+            className="document-tab"
+            tabIndex={-1}
+            type="button"
+          >
+            <NodeIcon node={tab} size={15} />
+            <span>{tab.title}</span>
+            <i><X size={11} /></i>
+          </button>
+        ))}
+      </div>
+
+      {tabs.map((tab) => {
+        if (hiddenSet.has(tab.id)) return null;
+        return (
+          <button
+            key={tab.id}
+            role="tab"
+            type="button"
+            aria-selected={tab.id === activeId}
+            className={`document-tab ${tab.id === activeId ? "active" : ""}`}
+            onClick={() => onSelect(tab.id)}
+          >
+            <NodeIcon node={tab} size={15} />
+            <span>{tab.title}</span>
+            <i
+              role="button"
+              aria-label={`关闭 ${tab.title}`}
+              tabIndex={0}
+              onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onClose(tab.id);
+                }
+              }}
+            ><X size={11} /></i>
+          </button>
+        );
+      })}
+
+      <div className="tabbar-spacer" data-tauri-drag-region />
+
+      {hiddenTabs.length > 0 && (
+        <div className="tab-overflow" ref={overflowRef}>
+          <button
+            type="button"
+            className={`tab-overflow-button ${menuOpen ? "open" : ""}`}
+            aria-label="更多页签"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            <ChevronDown size={14} />
+          </button>
+          {menuOpen && (
+            <div className="tab-overflow-menu" role="menu" aria-label="被隐藏的页签">
+              {hiddenTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="menuitem"
+                  className={tab.id === activeId ? "active" : ""}
+                  onClick={() => {
+                    onSelect(tab.id);
+                    setMenuOpen(false);
+                  }}
+                >
+                  <NodeIcon node={tab} size={14} />
+                  <span>{tab.title}</span>
+                  <i
+                    role="button"
+                    aria-label={`关闭 ${tab.title}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onClose(tab.id);
+                    }}
+                  ><X size={12} /></i>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <button type="button" className="tabbar-action" aria-label="更多操作" onClick={onOpenInfo}>
+        <MoreVertical size={16} />
+      </button>
+    </div>
+  );
+}
+
+
+type BreadcrumbSibling = {
+  id: string;
+  label: string;
+  kind: "node" | "heading";
+};
+
+type BreadcrumbSegment = {
+  key: string;
+  label: string;
+  currentId?: string;
+  siblings: BreadcrumbSibling[];
+};
+
+function PathBreadcrumbs({
+  selected,
+  nodes,
+  projectName,
+  canvasPath,
+  editorDocument,
+  onSelectNode,
+  onSelectHeading,
+}: {
+  selected: ContentNode;
+  nodes: ContentNode[];
+  projectName: string;
+  canvasPath: { id: string; content: string }[];
+  editorDocument: unknown[] | undefined;
+  onSelectNode: (id: string) => void;
+  onSelectHeading: (id: string) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [openKey, setOpenKey] = useState<string | null>(null);
+
+  const segments = useMemo<BreadcrumbSegment[]>(() => {
+    const rootNodes = nodes.filter((node) => node.parentId === null);
+    const kindLabel = selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件";
+    const kindNodes = nodes.filter((node) => node.kind === selected.kind);
+    const peerNodes = nodes.filter((node) => node.parentId === selected.parentId);
+
+    const items: BreadcrumbSegment[] = [
+      {
+        key: "root",
+        label: projectName,
+        siblings: rootNodes.map((node) => ({ id: node.id, label: node.title, kind: "node" })),
+      },
+      {
+        key: "kind",
+        label: kindLabel,
+        currentId: selected.id,
+        siblings: kindNodes.map((node) => ({ id: node.id, label: node.title, kind: "node" })),
+      },
+      {
+        key: `node-${selected.id}`,
+        label: selected.title,
+        currentId: selected.id,
+        siblings: peerNodes.map((node) => ({ id: node.id, label: node.title, kind: "node" })),
+      },
+    ];
+
+    for (const crumb of canvasPath) {
+      items.push({
+        key: `heading-${crumb.id}`,
+        label: crumb.content,
+        currentId: crumb.id,
+        siblings: getHeadingSiblings(editorDocument, crumb.id).map((item) => ({
+          id: item.id,
+          label: item.content,
+          kind: "heading",
+        })),
+      });
+    }
+
+    return items;
+  }, [selected, nodes, projectName, canvasPath, editorDocument]);
+
+  useEffect(() => {
+    if (!openKey) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpenKey(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenKey(null);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openKey]);
+
+  useEffect(() => {
+    setOpenKey(null);
+  }, [selected.id, canvasPath.map((item) => item.id).join("/")]);
+
+  return (
+    <div className="breadcrumbs" ref={rootRef} aria-label="当前位置">
+      {segments.map((segment, index) => (
+        <Fragment key={segment.key}>
+          {index > 0 && <ChevronRight size={13} />}
+          <div className={`breadcrumb-item ${openKey === segment.key ? "open" : ""}`}>
+            <button
+              type="button"
+              className={`breadcrumb-trigger ${segment.key === "root" ? "is-root" : ""}`}
+              aria-haspopup="menu"
+              aria-expanded={openKey === segment.key}
+              onClick={() => setOpenKey((current) => current === segment.key ? null : segment.key)}
+            >
+              <span>{segment.label}</span>
+            </button>
+            {openKey === segment.key && (
+              <div className="breadcrumb-menu" role="menu" aria-label={`${segment.label} 同级内容`}>
+                {segment.siblings.length === 0 ? (
+                  <div className="breadcrumb-menu-empty">暂无同级内容</div>
+                ) : (
+                  segment.siblings.map((sibling) => {
+                    const node = sibling.kind === "node"
+                      ? nodes.find((item) => item.id === sibling.id)
+                      : undefined;
+                    return (
+                      <button
+                        key={sibling.id}
+                        type="button"
+                        role="menuitem"
+                        className={sibling.id === segment.currentId ? "active" : ""}
+                        onClick={() => {
+                          if (sibling.kind === "heading") onSelectHeading(sibling.id);
+                          else onSelectNode(sibling.id);
+                          setOpenKey(null);
+                        }}
+                      >
+                        {sibling.kind === "heading" ? (
+                          <Hash size={13} />
+                        ) : node ? (
+                          <NodeIcon node={node} size={13} />
+                        ) : (
+                          <FileText size={13} />
+                        )}
+                        <span>{sibling.label}</span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+
 function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(cloneInitial);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
-  const [rightTool, setRightTool] = useState<"info" | "outline" | "ai" | null>(null);
+  const [rightTool, setRightTool] = useState<RightTool | null>(null);
   const [bottomTool, setBottomTool] = useState<BottomTool | null>(null);
   const [secondaryBottomTool, setSecondaryBottomTool] = useState<SecondaryBottomTool | null>(null);
   const [query, setQuery] = useState("");
   const [lockedNodeIds, setLockedNodeIds] = useState<string[]>([]);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
+  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [primaryLeftTool, setPrimaryLeftTool] = useState<PrimaryLeftTool | null>("project");
   const [secondaryLeftTool, setSecondaryLeftTool] = useState<SecondaryLeftTool | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(316);
   const [openTabIds, setOpenTabIds] = useState<string[]>([initialWorkspace.selectedNodeId]);
+  const [treeSelectedId, setTreeSelectedId] = useState(initialWorkspace.selectedNodeId);
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [gitInfo, setGitInfo] = useState<GitRepositoryInfo>(emptyGitInfo);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [indexedSearchResults, setIndexedSearchResults] = useState<WorkspaceSearchResult[] | null>(null);
   const hydrated = useRef(false);
 
   useEffect(() => {
     void loadWorkspace().then((stored) => {
-      if (stored) setWorkspace(stored);
+      if (stored) {
+        setWorkspace(stored);
+        setTreeSelectedId(stored.selectedNodeId);
+        setOpenTabIds([stored.selectedNodeId]);
+      }
       hydrated.current = true;
       setSyncStatus(navigator.onLine ? "saved" : "offline");
     });
+
+    void getCurrentProject()
+      .then((path) => {
+        if (path) setProjectPath(path);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      return listen<ProjectCreatedPayload>(PROJECT_CREATED_EVENT, (event) => {
+        handleProjectCreated(event.payload.workspace, event.payload.path);
+      }).then((stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      });
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -773,26 +1478,97 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [workspace]);
 
+  useEffect(() => {
+    if (!projectPath || !("__TAURI_INTERNALS__" in window)) {
+      setGitInfo(emptyGitInfo);
+      return;
+    }
+    let cancelled = false;
+    setGitLoading(true);
+    void getGitRepositoryInfo()
+      .then((info) => {
+        if (!cancelled) {
+          setGitInfo(info);
+          setGitError(info.error ?? null);
+        }
+      })
+      .catch((error) => { if (!cancelled) setGitError(error instanceof Error ? error.message : String(error)); })
+      .finally(() => { if (!cancelled) setGitLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectPath, primaryLeftTool, secondaryBottomTool]);
+
+  useEffect(() => {
+    const normalized = query.trim();
+    if (!normalized) {
+      setIndexedSearchResults([]);
+      return;
+    }
+    if (!("__TAURI_INTERNALS__" in window) || !projectPath) {
+      setIndexedSearchResults(null);
+      return;
+    }
+    let cancelled = false;
+    setIndexedSearchResults(null);
+    const timer = window.setTimeout(() => {
+      void searchWorkspace(normalized, 20)
+        .then((results) => { if (!cancelled) setIndexedSearchResults(results); })
+        .catch(() => { if (!cancelled) setIndexedSearchResults([]); });
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [projectPath, query, workspace.lastSavedAt]);
+
   const selected = workspace.nodes.find((node) => node.id === workspace.selectedNodeId) ?? workspace.nodes[0];
   const selectedReadOnly = lockedNodeIds.includes(selected.id);
+  const projectName = projectNameFromPath(projectPath);
   const openTabs = openTabIds
     .map((id) => workspace.nodes.find((node) => node.id === id))
     .filter((node): node is ContentNode => Boolean(node));
-  const searchResults = useMemo(() => {
+  const fallbackSearchResults = useMemo<WorkspaceSearchResult[]>(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return [];
-    return workspace.nodes.filter((node) => node.title.toLowerCase().includes(normalized)).slice(0, 12);
-  }, [query, workspace.nodes]);
+    const tagsById = new Map((workspace.tags ?? []).map((tag) => [tag.id, tag]));
+    return workspace.nodes.flatMap((node) => {
+      const markdown = workspace.noteMarkdown?.[node.id] ?? "";
+      const matches = node.title.toLowerCase().includes(normalized) ||
+        markdown.toLowerCase().includes(normalized) ||
+        node.tagIds?.some((tagId) => tagsById.get(tagId)?.name.toLowerCase().includes(normalized));
+      return matches ? [{
+        nodeId: node.id,
+        title: node.title,
+        kind: node.kind,
+        fileType: node.fileType,
+        path: node.localPath ?? "",
+        snippet: markdown.slice(0, 120),
+        score: node.title.toLowerCase().includes(normalized) ? 60 : 20,
+      }] : [];
+    }).slice(0, 20);
+  }, [query, workspace.nodes, workspace.noteMarkdown, workspace.tags]);
+  const searchResults = indexedSearchResults ?? fallbackSearchResults;
   const outlineItems = workspace.editorDocuments?.[selected.id]
     ? getDocumentOutline(workspace.editorDocuments[selected.id])
     : (workspace.blocks[selected.id] ?? []).filter((block) =>
         (block.kind === "heading1" || block.kind === "heading" || block.kind === "heading3") && block.content
       ).map((block) => ({ id: block.id, content: block.content ?? "" }));
-  const canvasPath = selected.kind === "page" ? outlineItems.slice(0, 2) : [];
+  const canvasPath = selected.kind === "page"
+    ? getCanvasPathForBlock(workspace.editorDocuments?.[selected.id], activeBlockId)
+    : [];
 
   useEffect(() => {
     setCursorPosition({ line: 1, column: 1 });
+    setActiveBlockId(null);
   }, [selected.id]);
+
+  useEffect(() => {
+    const title = `${projectName} - ${selected.title}`;
+    document.title = title;
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+      void getCurrentWindow().setTitle(title);
+    }).catch(() => undefined);
+  }, [projectName, selected.title]);
 
   useEffect(() => {
     const updateCursorPosition = () => {
@@ -831,13 +1607,103 @@ function App() {
     };
   }, []);
 
-  function toggleRightTool(tool: "info" | "outline" | "ai") {
+  function toggleRightTool(tool: RightTool) {
     setRightTool((current) => current === tool ? null : tool);
   }
 
   function selectNode(id: string) {
     setWorkspace((current) => ({ ...current, selectedNodeId: id }));
     setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
+  }
+
+  function selectFromTree(id: string) {
+    setTreeSelectedId(id);
+    selectNode(id);
+  }
+
+  function handleProjectCreated(nextWorkspace: WorkspaceState, nextProjectPath: string) {
+    hydrated.current = true;
+    setProjectPath(nextProjectPath);
+    setWorkspace(nextWorkspace);
+    setTreeSelectedId(nextWorkspace.selectedNodeId);
+    setOpenTabIds([nextWorkspace.selectedNodeId]);
+    setLockedNodeIds([]);
+    setQuery("");
+    setSyncStatus(navigator.onLine ? "saved" : "offline");
+  }
+
+  async function refreshGitStatus() {
+    if (!projectPath || !("__TAURI_INTERNALS__" in window)) return;
+    setGitLoading(true);
+    setGitError(null);
+    try {
+      const info = await getGitRepositoryInfo();
+      setGitInfo(info);
+      setGitError(info.error ?? null);
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGitLoading(false);
+    }
+  }
+
+  async function commitWorkspace() {
+    if (!commitMessage.trim()) return;
+    setGitLoading(true);
+    setGitError(null);
+    try {
+      await saveWorkspace({ ...workspace, lastSavedAt: new Date().toISOString() });
+      const info = await commitAll(commitMessage);
+      setGitInfo(info);
+      setCommitMessage("");
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGitLoading(false);
+    }
+  }
+
+  async function importPdfFile() {
+    if (!("__TAURI_INTERNALS__" in window) || !projectPath) {
+      window.alert("请先在桌面应用中创建或打开本地项目");
+      return;
+    }
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selectedPath = await open({
+        multiple: false,
+        directory: false,
+        title: "导入 PDF",
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (typeof selectedPath !== "string" || !selectedPath) return;
+      const imported = await importPdf(selectedPath);
+      const parentId = selected.kind === "folder" ? selected.id : selected.parentId;
+      const node: ContentNode = {
+        id: imported.id,
+        parentId,
+        kind: "file",
+        title: imported.title,
+        fileType: "PDF",
+        size: formatFileSize(imported.size),
+        updatedAt: "刚刚",
+        localPath: imported.relativePath,
+        contentHash: imported.contentHash,
+        lfsTracked: imported.lfsTracked,
+      };
+      setWorkspace((current) => ({
+        ...current,
+        selectedNodeId: node.id,
+        nodes: [...current.nodes, node],
+      }));
+      setTreeSelectedId(node.id);
+      setOpenTabIds((current) => [...current, node.id]);
+      window.setTimeout(() => { void refreshGitStatus(); }, 650);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setGitError(message);
+      window.alert(message);
+    }
   }
 
   function closeTab(id: string) {
@@ -889,10 +1755,11 @@ function App() {
     }));
   }
 
-  function updateDocument(pageId: string, document: unknown[]) {
+  function updateDocument(pageId: string, document: unknown[], markdown: string) {
     setWorkspace((current) => ({
       ...current,
       editorDocuments: { ...current.editorDocuments, [pageId]: document },
+      noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
     }));
   }
 
@@ -977,6 +1844,7 @@ function App() {
       blocks: kind === "page" ? { ...current.blocks, [id]: [{ id: `${id}-block`, kind: "text", content: "" }] } : current.blocks,
     }));
     setOpenTabIds((current) => [...current, id]);
+    setTreeSelectedId(id);
   }
 
   function renameNode(id: string, title: string) {
@@ -984,6 +1852,55 @@ function App() {
     setWorkspace((current) => ({
       ...current,
       nodes: current.nodes.map((node) => node.id === id ? { ...node, title, updatedAt: "刚刚" } : node),
+    }));
+  }
+
+  function setNodeMarkerColor(id: string, markerColor?: MarkerColor) {
+    setWorkspace((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => node.id === id ? { ...node, markerColor, updatedAt: "刚刚" } : node),
+    }));
+  }
+
+  function setNodeTags(id: string, tagIds: string[]) {
+    setWorkspace((current) => {
+      const validIds = new Set((current.tags ?? []).map((tag) => tag.id));
+      const normalized = [...new Set(tagIds)].filter((tagId) => validIds.has(tagId));
+      return {
+        ...current,
+        nodes: current.nodes.map((node) => node.id === id ? { ...node, tagIds: normalized, updatedAt: "刚刚" } : node),
+      };
+    });
+  }
+
+  function createTag(nodeId: string, name: string) {
+    const normalizedName = name.trim();
+    if (!normalizedName) return;
+    setWorkspace((current) => {
+      const existing = (current.tags ?? []).find((tag) => tag.name.localeCompare(normalizedName, undefined, { sensitivity: "accent" }) === 0);
+      const tag: TagDefinition = existing ?? {
+        id: `tag-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name: normalizedName,
+      };
+      return {
+        ...current,
+        tags: existing ? current.tags : [...(current.tags ?? []), tag],
+        nodes: current.nodes.map((node) => node.id === nodeId
+          ? { ...node, tagIds: [...new Set([...(node.tagIds ?? []), tag.id])], updatedAt: "刚刚" }
+          : node),
+      };
+    });
+  }
+
+  function deleteTag(tagId: string) {
+    const tag = (workspace.tags ?? []).find((item) => item.id === tagId);
+    if (!tag || !window.confirm(`确定删除标签“${tag.name}”吗？该标签会从所有文件和笔记中移除。`)) return;
+    setWorkspace((current) => ({
+      ...current,
+      tags: (current.tags ?? []).filter((item) => item.id !== tagId),
+      nodes: current.nodes.map((node) => node.tagIds?.includes(tagId)
+        ? { ...node, tagIds: node.tagIds.filter((id) => id !== tagId), updatedAt: "刚刚" }
+        : node),
     }));
   }
 
@@ -1050,6 +1967,7 @@ function App() {
       const remaining = current.filter((id) => !allIds.has(id));
       return leavesWorkspaceEmpty ? [fallbackId] : remaining;
     });
+    setTreeSelectedId((current) => allIds.has(current) ? (leavesWorkspaceEmpty ? fallbackId : workspace.nodes.find((node) => !allIds.has(node.id))?.id ?? "") : current);
   }
 
   const syncCopy = syncStatus === "loading" ? "读取本地数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "offline" ? "离线模式" : "已保存到本地";
@@ -1061,28 +1979,23 @@ function App() {
     } as React.CSSProperties}>
       <header className="window-titlebar" aria-label="窗口标题栏">
         <div className="titlebar-main" data-tauri-drag-region>
-          <strong data-tauri-drag-region>HyperSpace - {selected.title}</strong>
+          <strong data-tauri-drag-region title={projectPath ?? projectName}>{projectName} - {selected.title}</strong>
         </div>
         <div className="ide-toolbar">
-          <div className="breadcrumbs" aria-label="当前位置">
-            <strong>HyperSpace</strong>
-            <ChevronRight size={13} />
-            <span>{selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件"}</span>
-            <ChevronRight size={13} />
-            <span>{selected.title}</span>
-            {canvasPath.map((item) => (
-              <Fragment key={item.id}>
-                <ChevronRight size={13} />
-                <span>{item.content}</span>
-              </Fragment>
-            ))}
-          </div>
-          <div className="command-search">
-            <Search size={13} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} onFocus={() => setBottomTool("search")} placeholder="搜索工作空间" />
-            <kbd><Command size={10} /> K</kbd>
-          </div>
+          <PathBreadcrumbs
+            selected={selected}
+            nodes={workspace.nodes}
+            projectName={projectName}
+            canvasPath={canvasPath}
+            editorDocument={workspace.editorDocuments?.[selected.id]}
+            onSelectNode={selectNode}
+            onSelectHeading={(blockId) => {
+              setActiveBlockId(blockId);
+              requestAnimationFrame(() => focusCanvasBlock(blockId));
+            }}
+          />
           <div className={`toolbar-sync ${syncStatus}`}><Cloud size={13} /><span>{syncCopy}</span></div>
+          <button className="toolbar-secondary" onClick={() => void importPdfFile()}><FileUp size={13} /> 导入 PDF</button>
           <button className="toolbar-primary" onClick={createPage}><Plus size={13} /> 新建页面</button>
           <button className="toolbar-icon" aria-label="更多操作"><MoreHorizontal size={15} /></button>
         </div>
@@ -1100,10 +2013,19 @@ function App() {
           {primaryLeftTool === "project" ? (
             <ProjectSidebar
               workspace={workspace}
-              onSelect={selectNode}
+              treeSelectedId={treeSelectedId}
+              activeNodeId={selected.id}
+              projectName={projectName}
+              projectPath={projectPath}
+              onSelect={selectFromTree}
+              onRevealActive={() => setTreeSelectedId(selected.id)}
               onCreatePage={createPage}
               onCreateNode={createNode}
               onRenameNode={renameNode}
+              onSetNodeMarkerColor={setNodeMarkerColor}
+              onSetNodeTags={setNodeTags}
+              onCreateTag={createTag}
+              onDeleteTag={deleteTag}
               onMoveNodes={moveNodes}
               onDeleteNodes={deleteNodes}
               onClose={() => setPrimaryLeftTool(null)}
@@ -1113,6 +2035,9 @@ function App() {
               tool={primaryLeftTool}
               outlineItems={outlineItems}
               bookmarks={workspace.nodes.filter((node) => node.favorite)}
+              gitInfo={gitInfo}
+              gitLoading={gitLoading}
+              onRefreshGit={() => void refreshGitStatus()}
               onSelectNode={selectNode}
               onClose={() => setPrimaryLeftTool(null)}
             />
@@ -1131,40 +2056,16 @@ function App() {
       )}
 
       <main className="workspace">
-        <div className="workspace-tabs" role="tablist" aria-label="打开的页面">
-          {openTabs.map((tab) => (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={tab.id === selected.id}
-              className={`document-tab ${tab.id === selected.id ? "active" : ""}`}
-              onClick={() => selectNode(tab.id)}
-            >
-              <NodeIcon node={tab} size={17} />
-              <span>{tab.title}</span>
-              <i
-                role="button"
-                aria-label={`关闭 ${tab.title}`}
-                tabIndex={0}
-                onClick={(event) => { event.stopPropagation(); closeTab(tab.id); }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    closeTab(tab.id);
-                  }
-                }}
-              ><X size={14} /></i>
-            </button>
-          ))}
-          <div className="tabbar-spacer" data-tauri-drag-region />
-          <button className="tabbar-action" aria-label="打开页面信息" onClick={() => toggleRightTool("info")}>
-            <SlidersHorizontal size={16} />
-          </button>
-        </div>
+        <WorkspaceTabBar
+          tabs={openTabs}
+          activeId={selected.id}
+          onSelect={selectNode}
+          onClose={closeTab}
+          onOpenInfo={() => toggleRightTool("notifications")}
+        />
 
         <div className={`workspace-content ${rightTool ? "with-details" : ""}`}>
-          <section className="workspace-canvas" role="tabpanel">
+          <section className="workspace-canvas" role="tabpanel" onContextMenu={(event) => event.preventDefault()}>
             {openTabs.length === 0 ? (
               <div className="blank-workspace"><FileText size={34} /><p>从项目列表中选择一个页面</p></div>
             ) : selected.kind === "page" ? (
@@ -1173,39 +2074,56 @@ function App() {
                 workspace={workspace}
                 readOnly={selectedReadOnly}
                 onTitleChange={(title) => { if (!selectedReadOnly) updateSelectedNode({ title }); }}
-                onDocumentChange={(document) => { if (!selectedReadOnly) updateDocument(selected.id, document); }}
+                onDocumentChange={(document, markdown) => { if (!selectedReadOnly) updateDocument(selected.id, document, markdown); }}
+                onActiveBlockChange={setActiveBlockId}
               />
             ) : <EmptyView node={selected} />}
           </section>
 
           {rightTool && (
             <aside className="details-panel">
-              <div className="details-header"><strong>{rightTool === "info" ? "页面信息" : rightTool === "outline" ? "页面大纲" : "AI 助手"}</strong><button onClick={() => setRightTool(null)} aria-label="关闭辅助面板"><X size={16} /></button></div>
-              {rightTool === "info" && (
-                <>
-                  <dl className="property-list">
-                    <div><dt><Hash size={14} /> 类型</dt><dd>{selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件"}</dd></div>
-                    <div><dt><Clock3 size={14} /> 更新</dt><dd>{selected.updatedAt}</dd></div>
-                    <div><dt><Users size={14} /> 访问</dt><dd>仅自己</dd></div>
-                    <div><dt><Star size={14} /> 收藏</dt><dd><button className={selected.favorite ? "is-favorite" : ""} onClick={() => updateSelectedNode({ favorite: !selected.favorite })}>{selected.favorite ? "已收藏" : "添加"}</button></dd></div>
-                  </dl>
-                  <div className="activity-section">
-                    <h3>动态</h3>
-                    <div className="activity-item"><span className="mini-avatar">JL</span><p><strong>你</strong> 更新了此页面<small>刚刚</small></p></div>
-                    <div className="activity-item system"><span><Cloud size={14} /></span><p>内容已保存到本地<small>自动保存</small></p></div>
+              <div className="details-header"><strong>{rightTool === "notifications" ? "Notification" : rightTool === "references" ? "Referenced Files" : "AI Chat"}</strong><button onClick={() => setRightTool(null)} aria-label="关闭辅助面板"><X size={16} /></button></div>
+              {rightTool === "notifications" && (
+                <div className="notification-list">
+                  <div className="notification-item">
+                    <Bell size={14} />
+                    <div>
+                      <strong>工作空间已同步</strong>
+                      <p>本地更改已保存完成。</p>
+                      <small>刚刚</small>
+                    </div>
                   </div>
-                  <button className="help-link"><CircleHelp size={15} /> 本地数据如何工作？</button>
-                </>
+                  <div className="notification-item">
+                    <Files size={14} />
+                    <div>
+                      <strong>有文件被引用</strong>
+                      <p>当前页面新增了 1 个引用文件。</p>
+                      <small>12 分钟前</small>
+                    </div>
+                  </div>
+                  <p className="panel-empty-hint">暂无更多通知</p>
+                </div>
               )}
-              {rightTool === "outline" && (
-                <div className="outline-list">
-                  {outlineItems.length > 0 ? outlineItems.map((item, index) => <button key={item.id}><Hash size={13} /><span>{item.content}</span><small>{index + 1}</small></button>) : <p>当前页面没有标题结构。</p>}
+              {rightTool === "references" && (
+                <div className="reference-list">
+                  {workspace.nodes.filter((node) => node.kind === "file").slice(0, 8).map((node) => (
+                    <button key={node.id} className="reference-item" onClick={() => selectNode(node.id)}>
+                      <NodeIcon node={node} size={15} />
+                      <span>
+                        <strong>{node.title}</strong>
+                        <small>{node.fileType ?? "文件"} · {node.updatedAt}</small>
+                      </span>
+                    </button>
+                  ))}
+                  {workspace.nodes.every((node) => node.kind !== "file") && (
+                    <p className="panel-empty-hint">当前工作空间还没有可引用的文件</p>
+                  )}
                 </div>
               )}
               {rightTool === "ai" && (
                 <div className="ai-card expanded">
                   <span className="ai-icon"><Sparkles size={17} /></span>
-                  <div><strong>询问当前工作空间</strong><p>继续写作、总结当前页面，或从全部笔记和文件中寻找答案。</p></div>
+                  <div><strong>AI Chat</strong><p>围绕当前页面继续写作、总结内容，或在工作空间中查找答案。</p></div>
                   <div className="ai-suggestions"><button>总结当前页面</button><button>提取待办事项</button><button>寻找相关内容</button></div>
                   <button className="ai-start">开始对话</button>
                 </div>
@@ -1218,11 +2136,24 @@ function App() {
           <section className="bottom-panel" aria-label="底部工具窗口">
             <div className="bottom-panel-header">
               <strong>全局搜索</strong>
+              <label className="bottom-search-field">
+                <Search size={14} />
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索工作空间"
+                  autoFocus
+                />
+              </label>
               <span>{searchResults.length} 个结果</span>
               <button onClick={() => setBottomTool(null)} aria-label="收起底部工具窗口" title="收起窗口"><Minus size={15} /></button>
             </div>
             <div className="bottom-panel-content">
-              {query.trim() ? searchResults.map((node) => <button key={node.id} onClick={() => selectNode(node.id)}><NodeIcon node={node} /><span><strong>{node.title}</strong><small>{node.kind === "page" ? "笔记" : node.kind === "folder" ? "文件夹" : node.fileType}</small></span><ChevronRight size={14} /></button>) : <div className="tool-empty"><Search size={20} /><span>在顶部输入关键词搜索页面和文件</span></div>}
+              {query.trim() ? searchResults.map((result) => {
+                const node = workspace.nodes.find((item) => item.id === result.nodeId);
+                if (!node) return null;
+                return <button key={result.nodeId} onClick={() => selectNode(result.nodeId)}><NodeIcon node={node} /><span><strong>{result.title}</strong><small>{result.snippet || result.path || (node.kind === "page" ? "笔记" : node.kind === "folder" ? "文件夹" : node.fileType)}</small></span><ChevronRight size={14} /></button>;
+              }) : <div className="tool-empty"><Search size={20} /><span>输入关键词搜索页面、文件和笔记正文</span></div>}
             </div>
           </section>
         )}
@@ -1238,8 +2169,42 @@ function App() {
             <button type="button" onClick={() => setSecondaryBottomTool(null)} aria-label="收起扩展底部工具窗口" title="收起窗口"><Minus size={15} /></button>
           </div>
           <div className="secondary-bottom-panel-content">
-            {secondaryBottomTool === "git" ? <GitBranch size={26} /> : secondaryBottomTool === "terminal" ? <TerminalSquare size={26} /> : secondaryBottomTool === "todo" ? <ListTodo size={26} /> : <Server size={26} />}
-            <span>{secondaryBottomTool === "git" ? "暂无 Git 输出" : secondaryBottomTool === "terminal" ? "Terminal 已就绪" : secondaryBottomTool === "todo" ? "暂无待办事项" : "暂无运行中的服务"}</span>
+            {secondaryBottomTool === "git" ? (
+              <div className="git-bottom-content">
+                <div className="git-bottom-summary">
+                  <span><GitBranch size={14} />{gitInfo.isRepository ? gitInfo.branch || "HEAD" : "未启用 Git"}</span>
+                  <span className={gitInfo.lfsAvailable ? "available" : "missing"}>Git LFS {gitInfo.lfsAvailable ? "可用" : "未安装"}</span>
+                  <button type="button" onClick={() => void refreshGitStatus()} disabled={gitLoading}><RefreshCw size={13} />刷新</button>
+                </div>
+                {gitError && <p className="git-error" role="alert">{gitError}</p>}
+                <div className="git-bottom-columns">
+                  <section>
+                    <strong>更改 · {gitInfo.changes.length}</strong>
+                    <div className="git-change-list compact">
+                      {gitInfo.changes.map((change, index) => <div key={`${change.path}-${index}`}><code>{change.status}</code><span>{change.path}</span></div>)}
+                      {gitInfo.isRepository && gitInfo.changes.length === 0 && <small>工作树干净</small>}
+                    </div>
+                    {gitInfo.isRepository && (
+                      <form className="git-commit-form" onSubmit={(event) => { event.preventDefault(); void commitWorkspace(); }}>
+                        <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="提交说明" disabled={gitLoading} />
+                        <button type="submit" disabled={gitLoading || !commitMessage.trim()}>提交全部</button>
+                      </form>
+                    )}
+                  </section>
+                  <section>
+                    <strong>历史 · {gitInfo.history.length}</strong>
+                    <div className="git-history-list">
+                      {gitInfo.history.map((commit) => <div key={commit.id}><code>{commit.shortId}</code><span><b>{commit.subject}</b><small>{commit.author} · {commit.authoredAt.slice(0, 10)}</small></span></div>)}
+                      {gitInfo.isRepository && gitInfo.history.length === 0 && <small>还没有提交记录</small>}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            ) : secondaryBottomTool === "terminal" ? (
+              <TerminalPanel projectPath={projectPath} />
+            ) : (
+              <><span>{secondaryBottomTool === "todo" ? <ListTodo size={26} /> : <Server size={26} />}</span><span>{secondaryBottomTool === "todo" ? "暂无待办事项" : "暂无运行中的服务"}</span></>
+            )}
           </div>
         </section>
       )}
@@ -1255,13 +2220,13 @@ function App() {
       <footer className="statusbar">
         <span className={`status-dot ${syncStatus}`} />
         <span>{syncCopy}</span>
-        <span>HyperSpace</span>
+        <span className="statusbar-project" title={projectPath ?? projectName}>{projectPath || projectName}</span>
         <span className="statusbar-spacer" />
         <span>{selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : selected.fileType ?? "文件"}</span>
         <span>UTF-8</span>
         <span>行 {cursorPosition.line}, 字符 {cursorPosition.column}</span>
         <span>LF</span>
-        <span className="statusbar-branch"><GitBranch size={13} /> master</span>
+        <span className="statusbar-branch"><GitBranch size={13} /> {gitInfo.isRepository ? gitInfo.branch || "HEAD" : "未启用"}</span>
         <button
           className={`statusbar-lock ${selectedReadOnly ? "locked" : ""}`}
           type="button"
@@ -1274,6 +2239,7 @@ function App() {
           {selectedReadOnly ? <Lock size={13} /> : <LockOpen size={13} />}
         </button>
       </footer>
+
     </div>
   );
 }

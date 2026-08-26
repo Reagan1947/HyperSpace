@@ -1,5 +1,12 @@
 export type NodeKind = "page" | "folder" | "file";
 
+export type MarkerColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
+
+export interface TagDefinition {
+  id: string;
+  name: string;
+}
+
 export interface ContentNode {
   id: string;
   parentId: string | null;
@@ -9,6 +16,11 @@ export interface ContentNode {
   size?: string;
   updatedAt: string;
   favorite?: boolean;
+  markerColor?: MarkerColor;
+  tagIds?: string[];
+  localPath?: string;
+  contentHash?: string;
+  lfsTracked?: boolean;
 }
 
 export type BlockKind =
@@ -34,8 +46,10 @@ export interface NoteBlock {
 
 export interface WorkspaceState {
   nodes: ContentNode[];
+  tags?: TagDefinition[];
   blocks: Record<string, NoteBlock[]>;
   editorDocuments?: Record<string, unknown[]>;
+  noteMarkdown?: Record<string, string>;
   selectedNodeId: string;
   lastSavedAt?: string;
 }
