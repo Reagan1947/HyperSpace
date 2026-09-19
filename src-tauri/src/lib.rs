@@ -8,9 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use tauri::{
-    menu::{AboutMetadata, MenuBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     window::Color,
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -18,7 +18,9 @@ use tauri_plugin_deep_link::DeepLinkExt;
 const WORKSPACE_FILE: &str = "workspace.json";
 const CURRENT_PROJECT_FILE: &str = "current_project.json";
 const MENU_NEW_PROJECT: &str = "new-project";
+const MENU_OPEN_FOLDER: &str = "open-folder";
 const MENU_PROJECT_SETTINGS: &str = "project-settings";
+const OPEN_FOLDER_REQUESTED_EVENT: &str = "open-folder-requested";
 const NEW_PROJECT_WINDOW_LABEL: &str = "new-project";
 const PROJECT_SETTINGS_WINDOW_LABEL: &str = "project-settings";
 
@@ -107,6 +109,21 @@ fn default_projects_directory(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn get_current_project(app: AppHandle) -> Result<Option<String>, String> {
     Ok(read_current_project(&app)?.map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn open_project(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    let project_path = PathBuf::from(path.trim());
+    if project_path.as_os_str().is_empty() {
+        return Err("Project path is required".into());
+    }
+    if !project_path.is_dir() {
+        return Err("所选路径不是有效的文件夹".into());
+    }
+
+    let workspace = workspace_store::open_project_workspace(&project_path)?;
+    write_current_project(&app, &project_path)?;
+    Ok(workspace)
 }
 
 #[tauri::command]
@@ -308,8 +325,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .quit()
         .build()?;
 
+    let open_folder_item = MenuItemBuilder::with_id(MENU_OPEN_FOLDER, "Open Folder…")
+        .accelerator("CmdOrCtrl+O")
+        .build(app)?;
+
     let file_submenu = SubmenuBuilder::new(app, "File")
         .text(MENU_NEW_PROJECT, "New Project")
+        .item(&open_folder_item)
         .separator()
         .item(&PredefinedMenuItem::close_window(
             app,
@@ -362,6 +384,10 @@ pub fn run() {
                             eprintln!("Failed to open New Project window: {error}");
                         }
                     });
+                } else if event.id().as_ref() == MENU_OPEN_FOLDER {
+                    if let Err(error) = app.emit(OPEN_FOLDER_REQUESTED_EVENT, ()) {
+                        eprintln!("Failed to request opening a folder: {error}");
+                    }
                 } else if event.id().as_ref() == MENU_PROJECT_SETTINGS {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -380,6 +406,7 @@ pub fn run() {
             app_data_directory,
             default_projects_directory,
             get_current_project,
+            open_project,
             create_project,
             git_repository_info,
             git_commit_all,

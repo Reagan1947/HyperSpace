@@ -108,6 +108,12 @@ export async function getCurrentProject(): Promise<string | null> {
   return invoke<string | null>("get_current_project");
 }
 
+export async function openProject(path: string): Promise<WorkspaceState | null> {
+  if (!isTauri()) return null;
+  const raw = await invoke<string | null>("open_project", { path });
+  return raw ? migrateWorkspace(JSON.parse(raw) as WorkspaceState) : null;
+}
+
 export function projectNameFromPath(path: string | null | undefined): string {
   return path?.split(/[/\\]/).filter(Boolean).at(-1)?.trim() || "HyperSpace";
 }

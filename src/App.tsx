@@ -66,7 +66,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { initialWorkspace } from "./data";
+import { createBlankWorkspace, initialWorkspace } from "./data";
 import { FileTree } from "./FileTree";
 import type { FileTreeHandle } from "./FileTree";
 import { TerminalPanel } from "./TerminalPanel";
@@ -77,6 +77,7 @@ import {
   getGitRepositoryInfo,
   importPdf,
   loadWorkspace,
+  openProject,
   projectNameFromPath,
   saveWorkspace,
   searchWorkspace,
@@ -1401,6 +1402,8 @@ function PathBreadcrumbs({
 }
 
 
+const OPEN_FOLDER_REQUESTED_EVENT = "open-folder-requested";
+
 function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(cloneInitial);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
@@ -1440,6 +1443,48 @@ function App() {
         if (path) setProjectPath(path);
       })
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      return listen(OPEN_FOLDER_REQUESTED_EVENT, async () => {
+        const { message, open } = await import("@tauri-apps/plugin-dialog");
+        try {
+          const selectedPath = await open({
+            directory: true,
+            multiple: false,
+            title: "Open Folder",
+          });
+          if (typeof selectedPath !== "string" || !selectedPath) return;
+
+          const openedWorkspace = await openProject(selectedPath);
+          const fallbackWorkspace = createBlankWorkspace(projectNameFromPath(selectedPath));
+          handleProjectOpened(openedWorkspace ?? fallbackWorkspace, selectedPath);
+        } catch (error) {
+          await message(error instanceof Error ? error.message : String(error), {
+            title: "Unable to Open Folder",
+            kind: "error",
+          });
+        }
+      }).then((stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      });
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1630,6 +1675,14 @@ function App() {
     setLockedNodeIds([]);
     setQuery("");
     setSyncStatus(navigator.onLine ? "saved" : "offline");
+  }
+
+  function handleProjectOpened(nextWorkspace: WorkspaceState, nextProjectPath: string) {
+    handleProjectCreated(nextWorkspace, nextProjectPath);
+    setGitInfo(emptyGitInfo);
+    setGitError(null);
+    setCommitMessage("");
+    setIndexedSearchResults(null);
   }
 
   async function refreshGitStatus() {

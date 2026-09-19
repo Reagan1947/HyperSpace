@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -11,6 +12,18 @@ const PROJECT_DIR_NAME: &str = ".hyperspace";
 const LEGACY_WORKSPACE_FILE: &str = "workspace.json";
 const MANIFEST_FILE: &str = "manifest.json";
 const SEARCH_INDEX_FILE: &str = "search-index.json";
+const MAX_SCANNED_NODES: usize = 20_000;
+const IGNORED_DIRECTORY_NAMES: &[&str] = &[
+    ".git",
+    ".hyperspace",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".venv",
+    "__pycache__",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +59,213 @@ fn value_string(value: Option<&Value>) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn filesystem_node_id(relative_path: &str) -> String {
+    let digest = Sha256::digest(relative_path.as_bytes());
+    let short_hash = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("fs-{short_hash}")
+}
+
+fn display_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let (value, unit) = if bytes < 1024 * 1024 {
+        (bytes as f64 / 1024.0, "KB")
+    } else if bytes < 1024 * 1024 * 1024 {
+        (bytes as f64 / (1024.0 * 1024.0), "MB")
+    } else {
+        (bytes as f64 / (1024.0 * 1024.0 * 1024.0), "GB")
+    };
+    format!("{value:.1} {unit}")
+}
+
+fn display_modified(metadata: &fs::Metadata) -> String {
+    let Ok(modified) = metadata.modified() else {
+        return String::new();
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return "刚刚".into();
+    };
+    let minutes = elapsed.as_secs() / 60;
+    if minutes < 1 {
+        "刚刚".into()
+    } else if minutes < 60 {
+        format!("{minutes} 分钟前")
+    } else if minutes < 24 * 60 {
+        format!("{} 小时前", minutes / 60)
+    } else {
+        format!("{} 天前", minutes / (24 * 60))
+    }
+}
+
+fn scan_directory(
+    project_path: &Path,
+    directory: &Path,
+    parent_id: Option<&str>,
+    existing_path_ids: &HashMap<String, String>,
+    nodes: &mut Vec<Value>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("Failed to read {}: {error}", directory.display()))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        let is_file = entry.file_type().map(|kind| kind.is_file()).unwrap_or(true);
+        (is_file, entry.file_name().to_string_lossy().to_lowercase())
+    });
+
+    for entry in entries {
+        if nodes.len() >= MAX_SCANNED_NODES {
+            return Err(format!("文件夹内容超过 {MAX_SCANNED_NODES} 项，无法完整展示"));
+        }
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if file_type.is_dir() && IGNORED_DIRECTORY_NAMES.contains(&name.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        let relative_path = path
+            .strip_prefix(project_path)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(existing_id) = existing_path_ids.get(&relative_path) {
+            if file_type.is_dir() {
+                scan_directory(
+                    project_path,
+                    &path,
+                    Some(existing_id),
+                    existing_path_ids,
+                    nodes,
+                )?;
+            }
+            continue;
+        }
+
+        let id = filesystem_node_id(&relative_path);
+        let metadata = entry.metadata().map_err(|error| error.to_string())?;
+        let mut node = json!({
+            "id": id,
+            "parentId": parent_id,
+            "kind": if file_type.is_dir() { "folder" } else { "file" },
+            "title": name,
+            "updatedAt": display_modified(&metadata),
+            "localPath": relative_path,
+        });
+        if file_type.is_file() {
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("FILE")
+                .to_uppercase();
+            node["fileType"] = Value::String(extension);
+            node["size"] = Value::String(display_size(metadata.len()));
+        }
+        nodes.push(node);
+
+        if file_type.is_dir() {
+            scan_directory(
+                project_path,
+                &path,
+                Some(&id),
+                existing_path_ids,
+                nodes,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, String> {
+    let loaded = load_project_workspace(project_path)?;
+    let mut workspace = loaded
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+        .map_err(|error| format!("Invalid workspace: {error}"))?
+        .unwrap_or_else(|| json!({
+            "nodes": [],
+            "blocks": {},
+            "editorDocuments": {},
+            "noteMarkdown": {}
+        }));
+
+    let mut existing_nodes = workspace
+        .get("nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // Filesystem nodes are a view of the current directory and must be rebuilt
+    // on every open so deleted and newly created files are reflected accurately.
+    existing_nodes.retain(|node| {
+        !node
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("fs-"))
+    });
+    let mut existing_path_ids = existing_nodes
+        .iter()
+        .filter_map(|node| {
+            let path = node.get("localPath").and_then(Value::as_str)?;
+            let id = node.get("id").and_then(Value::as_str)?;
+            (!path.is_empty()).then(|| (path.to_string(), id.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    for node in &existing_nodes {
+        if node.get("kind").and_then(Value::as_str) == Some("page") {
+            if let Some(id) = node.get("id").and_then(Value::as_str) {
+                existing_path_ids.insert(format!("notes/{id}.md"), id.to_string());
+            }
+        }
+    }
+
+    workspace["nodes"] = Value::Array(existing_nodes);
+
+    let mut scanned_nodes = Vec::new();
+    scan_directory(
+        project_path,
+        project_path,
+        None,
+        &existing_path_ids,
+        &mut scanned_nodes,
+    )?;
+    let (first_node_id, is_empty) = {
+        let nodes = workspace
+            .as_object_mut()
+            .ok_or_else(|| "Workspace must be a JSON object".to_string())?
+            .entry("nodes")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| "Workspace nodes must be an array".to_string())?;
+        nodes.extend(scanned_nodes);
+        (
+            nodes.first().and_then(|node| node.get("id")).cloned(),
+            nodes.is_empty(),
+        )
+    };
+
+    if workspace.get("selectedNodeId").and_then(Value::as_str).is_none() {
+        if let Some(id) = first_node_id {
+            workspace["selectedNodeId"] = id;
+        }
+    }
+    if is_empty {
+        return Ok(None);
+    }
+    serde_json::to_string(&workspace)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn safe_identifier(id: &str) -> Result<&str, String> {
@@ -576,6 +796,69 @@ mod tests {
             file_results.first().map(|result| result.node_id.as_str()),
             Some("file-one")
         );
+
+        fs::remove_dir_all(project).expect("remove temp project");
+    }
+
+    #[test]
+    fn open_project_workspace_scans_real_files_and_ignores_generated_directories() {
+        let project = test_directory("scan");
+        fs::create_dir_all(project.join("src/components")).expect("create source tree");
+        fs::create_dir_all(project.join("node_modules/pkg")).expect("create ignored tree");
+        fs::create_dir_all(project.join(".git")).expect("create git directory");
+        fs::create_dir_all(project.join(".idea")).expect("create hidden directory");
+        fs::write(project.join("README.md"), "hello").expect("write readme");
+        fs::write(project.join(".env"), "SECRET=hidden").expect("write hidden file");
+        fs::write(project.join(".idea/workspace.xml"), "hidden")
+            .expect("write file in hidden directory");
+        fs::write(project.join("src/main.ts"), "export {};").expect("write source");
+        fs::write(project.join("src/components/App.tsx"), "export default 1;")
+            .expect("write component");
+        fs::write(project.join("node_modules/pkg/index.js"), "ignored")
+            .expect("write ignored dependency");
+
+        let workspace = open_project_workspace(&project)
+            .expect("scan project")
+            .expect("workspace payload");
+        let workspace: Value = serde_json::from_str(&workspace).expect("valid workspace JSON");
+        let nodes = workspace["nodes"].as_array().expect("nodes array");
+        let paths = nodes
+            .iter()
+            .filter_map(|node| node.get("localPath").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+
+        assert!(paths.contains("README.md"));
+        assert!(paths.contains("src"));
+        assert!(paths.contains("src/main.ts"));
+        assert!(paths.contains("src/components/App.tsx"));
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
+        assert!(!paths.iter().any(|path| path.starts_with(".git")));
+        assert!(!paths.iter().any(|path| path.starts_with('.')));
+
+        let src_id = filesystem_node_id("src");
+        let main = nodes
+            .iter()
+            .find(|node| node["localPath"] == "src/main.ts")
+            .expect("main node");
+        assert_eq!(main["parentId"], src_id);
+        assert_eq!(main["fileType"], "TS");
+
+        save_project_workspace(&project, &workspace.to_string()).expect("save scanned workspace");
+        fs::remove_file(project.join("README.md")).expect("remove stale file");
+        fs::write(project.join("src/new.ts"), "export const value = 1;")
+            .expect("write newly discovered file");
+        let reopened = open_project_workspace(&project)
+            .expect("reopen project")
+            .expect("reopened payload");
+        let reopened: Value = serde_json::from_str(&reopened).expect("valid reopened workspace");
+        let reopened_paths = reopened["nodes"]
+            .as_array()
+            .expect("reopened nodes")
+            .iter()
+            .filter_map(|node| node.get("localPath").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+        assert!(!reopened_paths.contains("README.md"));
+        assert!(reopened_paths.contains("src/new.ts"));
 
         fs::remove_dir_all(project).expect("remove temp project");
     }

@@ -735,7 +735,7 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
               selection={selectedId}
               disableMultiSelection
               disableDrag
-              openByDefault
+              openByDefault={false}
               childrenAccessor="children"
               idAccessor="id"
               onActivate={(node) => onSelect(node.id)}
