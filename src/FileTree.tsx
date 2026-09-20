@@ -1,17 +1,21 @@
-import { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
   ChevronRight,
+  Delete,
   FileSpreadsheet,
   FileText,
   Folder,
+  FolderOpen,
   Pencil,
   Plus,
   Tag,
+  Terminal,
   Trash2,
 } from "lucide-react";
+import { openInTerminal, revealInFinder } from "./storage";
 import { Tree, adjustMoveIndex } from "react-arborist";
 import type { NodeRendererProps, TreeApi } from "react-arborist";
 import folderIcon from "./assets/icons/folder.svg";
@@ -39,6 +43,8 @@ interface FileTreeProps {
   onMove: (dragIds: string[], parentId: string | null, index: number) => void;
   onCreate: (kind: Extract<NodeKind, "page" | "folder">, parentId: string | null) => void;
   onDelete: (ids: string[]) => void;
+  pendingRenameId?: string | null;
+  onPendingRenameHandled?: () => void;
 }
 
 const TREE_ROW_HEIGHT = 26;
@@ -50,13 +56,15 @@ export interface FileTreeHandle {
   revealNode: (id: string) => void;
   expandAll: () => void;
   collapseAll: () => void;
+  startRename: (id: string) => void;
 }
 
 const RenameContext = createContext<{
   editingId: string | null;
   startRename: (id: string) => void;
   finishRename: (id: string, title?: string) => void;
-}>({ editingId: null, startRename: () => undefined, finishRename: () => undefined });
+  retainFocus: () => boolean;
+}>({ editingId: null, startRename: () => undefined, finishRename: () => undefined, retainFocus: () => false });
 
 const MarkerContext = createContext<{
   setMarkerColor: (id: string, color?: MarkerColor) => void;
@@ -81,6 +89,16 @@ const MARKER_COLORS: { color: MarkerColor; label: string; value: string }[] = [
 
 function markerColorValue(color: MarkerColor) {
   return MARKER_COLORS.find((item) => item.color === color)?.value;
+}
+
+function selectEditableName(input: HTMLInputElement) {
+  const value = input.value;
+  const extensionIndex = value.lastIndexOf(".");
+  if (extensionIndex > 0) {
+    input.setSelectionRange(0, extensionIndex);
+    return;
+  }
+  input.select();
 }
 
 type DropPosition = "before" | "inside" | "after" | "root";
@@ -191,7 +209,36 @@ function TreeAssetIcon({ src }: { src: string }) {
   return <img className="tree-node-icon" src={src} alt="" aria-hidden="true" draggable={false} />;
 }
 
-function FileNodeIcon({ node }: { node: ContentNode }) {
+function reportOpenError(error: unknown) {
+  window.alert(error instanceof Error ? error.message : String(error));
+}
+
+function OpenExternallyItems({ localPath, onDone }: { localPath: string; onDone: () => void }) {
+  return (
+    <>
+      <button
+        role="menuitem"
+        onClick={() => {
+          onDone();
+          void revealInFinder(localPath).catch(reportOpenError);
+        }}
+      >
+        <FolderOpen size={14} />在 Finder 中打开
+      </button>
+      <button
+        role="menuitem"
+        onClick={() => {
+          onDone();
+          void openInTerminal(localPath).catch(reportOpenError);
+        }}
+      >
+        <Terminal size={14} />在终端打开
+      </button>
+    </>
+  );
+}
+
+export function FileNodeIcon({ node }: { node: ContentNode }) {
   if (node.kind === "folder") return <TreeAssetIcon src={folderIcon} />;
   if (isMarkdownNode(node)) return <TreeAssetIcon src={noteIcon} />;
   if (node.fileType === "XLSX") return <FileSpreadsheet size={16} strokeWidth={1.8} />;
@@ -200,7 +247,7 @@ function FileNodeIcon({ node }: { node: ContentNode }) {
 
 type TreeMenuState = { x: number; y: number } | null;
 
-function clampTreeMenuPosition(x: number, y: number, width = 174, height = 168) {
+function clampTreeMenuPosition(x: number, y: number, width = 174, height = 228) {
   const pad = 8;
   return {
     x: Math.max(pad, Math.min(x, window.innerWidth - width - pad)),
@@ -214,6 +261,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
   const [newTagName, setNewTagName] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const imeLockRef = useRef(false);
   const rename = useContext(RenameContext);
   const marker = useContext(MarkerContext);
   const tagContext = useContext(TagContext);
@@ -221,11 +269,12 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
   const isEditing = rename.editingId === node.id;
   const menuOpen = menu !== null;
 
-  useEffect(() => {
-    if (isEditing) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
+  useLayoutEffect(() => {
+    if (!isEditing) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    selectEditableName(input);
   }, [isEditing]);
 
   useEffect(() => {
@@ -271,7 +320,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
     event.stopPropagation();
     node.select();
     const supportsMarker = node.data.kind === "page" || node.data.kind === "file";
-    const next = clampTreeMenuPosition(event.clientX, event.clientY, supportsMarker ? 264 : 174, supportsMarker ? 292 : 168);
+    const next = clampTreeMenuPosition(event.clientX, event.clientY, supportsMarker ? 264 : 174, supportsMarker ? 352 : 228);
     setTagEditorOpen(false);
     setNewTagName("");
     setMenu({ x: next.x, y: next.y });
@@ -318,10 +367,33 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
           defaultValue={node.data.title}
           aria-label="重命名"
           onClick={(event) => event.stopPropagation()}
-          onBlur={(event) => rename.finishRename(node.id, event.currentTarget.value)}
+          onBlur={(event) => {
+            if (rename.retainFocus()) {
+              event.currentTarget.focus();
+              selectEditableName(event.currentTarget);
+              return;
+            }
+            rename.finishRename(node.id, event.currentTarget.value);
+          }}
+          onCompositionStart={() => {
+            imeLockRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            imeLockRef.current = true;
+            requestAnimationFrame(() => {
+              imeLockRef.current = false;
+            });
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Escape") rename.finishRename(node.id);
-            if (event.key === "Enter") rename.finishRename(node.id, event.currentTarget.value);
+            if (event.nativeEvent.isComposing || event.keyCode === 229 || imeLockRef.current) return;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              rename.finishRename(node.id);
+            }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              rename.finishRename(node.id, event.currentTarget.value);
+            }
           }}
         />
       ) : (
@@ -390,7 +462,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
                 aria-expanded={tagEditorOpen}
                 onClick={() => setTagEditorOpen((open) => !open)}
               >
-                <Tag size={14} />编辑标签 <ChevronRight className={tagEditorOpen ? "expanded" : ""} size={13} />
+                <Tag size={14} />编辑标签 <ChevronRight className={`menu-trailing ${tagEditorOpen ? "expanded" : ""}`} size={14} />
               </button>
               {tagEditorOpen && (
                 <div className="tree-tag-editor" onClick={(event) => event.stopPropagation()}>
@@ -458,7 +530,9 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
           <button role="menuitem" onClick={() => { closeMenu(); node.tree.props.onCreate?.({ parentId: parentForNewItem, parentNode: node.parent, index: 0, type: "leaf" }); }}><Plus size={14} />新建页面</button>
           <button role="menuitem" onClick={() => { closeMenu(); node.tree.props.onCreate?.({ parentId: parentForNewItem, parentNode: node.parent, index: 0, type: "internal" }); }}><Folder size={14} />新建文件夹</button>
           <span className="tree-menu-separator" />
-          <button className="danger" role="menuitem" onClick={() => { closeMenu(); node.tree.delete(node.id); }}><Trash2 size={14} />删除 <kbd>⌫</kbd></button>
+          <OpenExternallyItems localPath={node.data.localPath ?? ""} onDone={closeMenu} />
+          <span className="tree-menu-separator" />
+          <button className="danger" role="menuitem" onClick={() => { closeMenu(); node.tree.delete(node.id); }}><Trash2 size={14} />删除 <kbd aria-label="Backspace"><Delete size={14} /></kbd></button>
         </div>,
         document.body,
       )}
@@ -467,7 +541,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
 }
 
 export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
-  { nodes, selectedId, projectName, projectPath, filter = null, tagFilterIds = [], tags, onSelect, onRename, onSetMarkerColor, onSetTags, onCreateTag, onDeleteTag, onMove, onCreate, onDelete },
+  { nodes, selectedId, projectName, projectPath, filter = null, tagFilterIds = [], tags, onSelect, onRename, onSetMarkerColor, onSetTags, onCreateTag, onDeleteTag, onMove, onCreate, onDelete, pendingRenameId = null, onPendingRenameHandled },
   ref,
 ) {
   const visibleNodes = useMemo(() => filterTreeNodes(nodes, filter, tagFilterIds), [filter, nodes, tagFilterIds]);
@@ -481,6 +555,10 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const suppressClickUntil = useRef(0);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const retainFocusUntil = useRef(0);
+  const activeRenameId = useRef<string | null>(null);
+  const onPendingRenameHandledRef = useRef(onPendingRenameHandled);
+  onPendingRenameHandledRef.current = onPendingRenameHandled;
 
   const runWhenTreeIsVisible = useCallback((action: (tree: TreeApi<FileTreeNode>) => void) => {
     setWorkspaceOpen(true);
@@ -489,22 +567,51 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
     });
   }, []);
 
+  const beginRename = useCallback((id: string, options?: { holdFocus?: boolean }) => {
+    activeRenameId.current = id;
+    setEditingId(id);
+    retainFocusUntil.current = options?.holdFocus ? performance.now() + 600 : 0;
+    runWhenTreeIsVisible((tree) => {
+      void Promise.resolve(tree.scrollTo(id, "center")).then(() => {
+        if (activeRenameId.current !== id) return;
+        const input = document.querySelector<HTMLInputElement>(".tree-rename-input");
+        if (!input) return;
+        input.focus();
+        selectEditableName(input);
+      });
+    });
+  }, [runWhenTreeIsVisible]);
+
   useImperativeHandle(ref, () => ({
     revealSelected: () => runWhenTreeIsVisible((tree) => { void tree.scrollTo(selectedId, "center"); }),
     revealNode: (id: string) => runWhenTreeIsVisible((tree) => { void tree.scrollTo(id, "center"); }),
     expandAll: () => runWhenTreeIsVisible((tree) => tree.openAll()),
     collapseAll: () => treeRef.current?.closeAll(),
-  }), [runWhenTreeIsVisible, selectedId]);
+    startRename: beginRename,
+  }), [beginRename, runWhenTreeIsVisible, selectedId]);
 
   const renameContext = useMemo(() => ({
     editingId,
-    startRename: setEditingId,
+    startRename: beginRename,
     finishRename: (id: string, title?: string) => {
+      if (activeRenameId.current !== id) return;
+      activeRenameId.current = null;
+      retainFocusUntil.current = 0;
       const normalized = title?.trim();
       if (normalized) onRename(id, normalized);
       setEditingId(null);
     },
-  }), [editingId, onRename]);
+    retainFocus: () => performance.now() < retainFocusUntil.current,
+  }), [beginRename, editingId, onRename]);
+
+  useLayoutEffect(() => {
+    if (!pendingRenameId) return;
+    if (!nodes.some((node) => node.id === pendingRenameId)) return;
+    if (visibleNodes.some((node) => node.id === pendingRenameId)) {
+      beginRename(pendingRenameId, { holdFocus: true });
+    }
+    onPendingRenameHandledRef.current?.();
+  }, [beginRename, nodes, pendingRenameId, visibleNodes]);
 
   const beginDrag = useCallback((id: string, title: string, event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -703,7 +810,7 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
       onContextMenu={(event) => {
         event.preventDefault();
         if ((event.target as Element).closest("[data-tree-node-id], .tree-context-menu")) return;
-        const next = clampTreeMenuPosition(event.clientX, event.clientY, 174, 96);
+        const next = clampTreeMenuPosition(event.clientX, event.clientY, 174, 168);
         setBlankMenu({ x: next.x, y: next.y });
       }}
     >
@@ -724,11 +831,16 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
               if (event.key === "F2" && selectedId) {
                 event.preventDefault();
                 event.stopPropagation();
-                setEditingId(selectedId);
+                beginRename(selectedId);
               }
               if (event.key === "Enter" && selectedId) {
                 event.preventDefault();
                 event.stopPropagation();
+                const node = treeRef.current?.get(selectedId);
+                if (node?.data.kind === "folder") {
+                  node.toggle();
+                  return;
+                }
                 onSelect(selectedId);
               }
             }}
@@ -748,7 +860,13 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
               openByDefault={false}
               childrenAccessor="children"
               idAccessor="id"
-              onActivate={(node) => onSelect(node.id)}
+              onActivate={(node) => {
+                if (node.data.kind === "folder") {
+                  node.toggle();
+                  return;
+                }
+                onSelect(node.id);
+              }}
               onSelect={(selectedNodes) => {
                 const selected = selectedNodes.at(-1);
                 if (selected) {
@@ -809,6 +927,8 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
         >
           <button role="menuitem" onClick={() => { setBlankMenu(null); onCreate("page", null); }}><Plus size={14} />新建页面</button>
           <button role="menuitem" onClick={() => { setBlankMenu(null); onCreate("folder", null); }}><Folder size={14} />新建文件夹</button>
+          <span className="tree-menu-separator" />
+          <OpenExternallyItems localPath="" onDone={() => setBlankMenu(null)} />
         </div>,
         document.body,
       )}

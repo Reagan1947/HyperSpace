@@ -4,6 +4,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { RefreshCw, Trash2 } from "lucide-react";
+import {
+  APP_SETTINGS_CHANGED_EVENT,
+  DEFAULT_APP_SETTINGS,
+  getAppSettings,
+  terminalCssFontFamily,
+  type AppSettings,
+} from "./appSettings";
 import "@xterm/xterm/css/xterm.css";
 
 type TerminalOutput = {
@@ -19,16 +26,53 @@ function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
 
+function applyTerminalFont(terminal: Terminal, fitAddon: FitAddon, settings: AppSettings) {
+  terminal.options.fontFamily = terminalCssFontFamily(settings.terminal.fontFamily);
+  terminal.options.fontSize = settings.terminal.fontSize;
+  fitAddon.fit();
+}
+
 export function TerminalPanel({ projectPath }: { projectPath: string | null }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [generation, setGeneration] = useState(0);
   const [status, setStatus] = useState<"starting" | "running" | "exited" | "error">("starting");
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const settingsReady = appSettings !== null;
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: UnlistenFn | undefined;
+
+    void getAppSettings()
+      .then((settings) => {
+        if (!disposed) setAppSettings(settings);
+      })
+      .catch(() => {
+        if (!disposed) setAppSettings(DEFAULT_APP_SETTINGS);
+      });
+
+    void listen<AppSettings>(APP_SETTINGS_CHANGED_EVENT, (event) => {
+      setAppSettings(event.payload);
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+        return;
+      }
+      stopListening = stop;
+    });
+
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || !isTauri()) return;
+    if (!host || !isTauri() || !appSettings) return;
 
     const sessionId = crypto.randomUUID();
     const terminal = new Terminal({
@@ -36,8 +80,8 @@ export function TerminalPanel({ projectPath }: { projectPath: string | null }) {
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "bar",
-      fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, monospace',
-      fontSize: 12,
+      fontFamily: terminalCssFontFamily(appSettings.terminal.fontFamily),
+      fontSize: appSettings.terminal.fontSize,
       lineHeight: 1.2,
       scrollback: 5000,
       theme: {
@@ -67,6 +111,7 @@ export function TerminalPanel({ projectPath }: { projectPath: string | null }) {
     terminal.loadAddon(fitAddon);
     terminal.open(host);
     terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
     fitAddon.fit();
     terminal.focus();
     setStatus("starting");
@@ -143,9 +188,17 @@ export function TerminalPanel({ projectPath }: { projectPath: string | null }) {
       unlisteners.forEach((unlisten) => unlisten());
       terminal.dispose();
       terminalRef.current = null;
+      fitAddonRef.current = null;
       void invoke("terminal_close", { sessionId }).catch(() => undefined);
     };
-  }, [generation, projectPath]);
+  }, [generation, projectPath, settingsReady]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon || !appSettings) return;
+    applyTerminalFont(terminal, fitAddon, appSettings);
+  }, [appSettings]);
 
   if (!isTauri()) {
     return (

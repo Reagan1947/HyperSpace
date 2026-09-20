@@ -241,3 +241,18 @@ export async function deleteWorkspaceEntries(localPaths: string[]): Promise<void
   if (!isTauri()) throw new Error("文件删除仅在桌面应用中可用");
   await invoke("delete_workspace_entries", { localPaths });
 }
+
+export async function moveWorkspaceEntry(localPath: string, destinationParent: string): Promise<string> {
+  if (!isTauri()) throw new Error("文件移动仅在桌面应用中可用");
+  return invoke<string>("move_workspace_entry", { localPath, destinationParent });
+}
+
+export async function revealInFinder(localPath = ""): Promise<void> {
+  if (!isTauri()) throw new Error("在 Finder 中打开仅在桌面应用中可用");
+  await invoke("reveal_in_finder", { localPath });
+}
+
+export async function openInTerminal(localPath = ""): Promise<void> {
+  if (!isTauri()) throw new Error("在终端打开仅在桌面应用中可用");
+  await invoke("open_in_terminal", { localPath });
+}

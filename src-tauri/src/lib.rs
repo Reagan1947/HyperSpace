@@ -1,3 +1,6 @@
+mod app_settings;
+mod fs_open;
+mod fs_watch;
 mod git_service;
 mod project_settings;
 mod terminal_service;
@@ -19,9 +22,14 @@ const WORKSPACE_FILE: &str = "workspace.json";
 const CURRENT_PROJECT_FILE: &str = "current_project.json";
 const MENU_NEW_PROJECT: &str = "new-project";
 const MENU_OPEN_FOLDER: &str = "open-folder";
+const MENU_SETTINGS: &str = "settings";
+const MENU_SETTINGS_TERMINAL: &str = "settings-terminal";
+const MENU_SETTINGS_TAGS: &str = "settings-tags";
 const MENU_PROJECT_SETTINGS: &str = "project-settings";
 const OPEN_FOLDER_REQUESTED_EVENT: &str = "open-folder-requested";
+const SETTINGS_NAVIGATE_EVENT: &str = "settings-navigate";
 const NEW_PROJECT_WINDOW_LABEL: &str = "new-project";
+const SETTINGS_WINDOW_LABEL: &str = "settings";
 const PROJECT_SETTINGS_WINDOW_LABEL: &str = "project-settings";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -70,7 +78,11 @@ fn write_current_project(app: &AppHandle, project_path: &Path) -> Result<(), Str
 #[tauri::command]
 fn load_workspace(app: AppHandle) -> Result<Option<String>, String> {
     if let Some(project_path) = read_current_project(&app)? {
-        return workspace_store::open_project_workspace(&project_path);
+        let workspace = workspace_store::open_project_workspace(&project_path);
+        if let Err(error) = fs_watch::start_watching(&app, &project_path) {
+            eprintln!("Failed to watch project: {error}");
+        }
+        return workspace;
     }
     let path = app_data_dir(&app)?.join(WORKSPACE_FILE);
     if !path.exists() {
@@ -87,6 +99,7 @@ fn save_workspace(app: AppHandle, payload: String) -> Result<(), String> {
     serde_json::from_str::<serde_json::Value>(&payload)
         .map_err(|error| format!("Workspace payload is not valid JSON: {error}"))?;
     if let Some(project_path) = read_current_project(&app)? {
+        fs_watch::quiet_watch(&app);
         return workspace_store::save_project_workspace(&project_path, &payload);
     }
     workspace_store::write_atomic(&app_data_dir(&app)?.join(WORKSPACE_FILE), &payload)
@@ -123,6 +136,9 @@ fn open_project(app: AppHandle, path: String) -> Result<Option<String>, String> 
 
     let workspace = workspace_store::open_project_workspace(&project_path)?;
     write_current_project(&app, &project_path)?;
+    if let Err(error) = fs_watch::start_watching(&app, &project_path) {
+        eprintln!("Failed to watch project: {error}");
+    }
     Ok(workspace)
 }
 
@@ -162,6 +178,9 @@ fn create_project(
 
     workspace_store::save_project_workspace(&project_path, &workspace_payload)?;
     write_current_project(&app, &project_path)?;
+    if let Err(error) = fs_watch::start_watching(&app, &project_path) {
+        eprintln!("Failed to watch project: {error}");
+    }
 
     Ok(project_path.to_string_lossy().into_owned())
 }
@@ -209,6 +228,7 @@ fn create_workspace_entry(
     parent_path: String,
     kind: String,
 ) -> Result<workspace_store::CreatedWorkspaceEntry, String> {
+    fs_watch::quiet_watch(&app);
     workspace_store::create_project_entry(&require_current_project(&app)?, &parent_path, &kind)
 }
 
@@ -218,12 +238,38 @@ fn rename_workspace_entry(
     local_path: String,
     new_name: String,
 ) -> Result<String, String> {
+    fs_watch::quiet_watch(&app);
     workspace_store::rename_project_entry(&require_current_project(&app)?, &local_path, &new_name)
 }
 
 #[tauri::command]
 fn delete_workspace_entries(app: AppHandle, local_paths: Vec<String>) -> Result<(), String> {
+    fs_watch::quiet_watch(&app);
     workspace_store::delete_project_entries(&require_current_project(&app)?, &local_paths)
+}
+
+#[tauri::command]
+fn move_workspace_entry(
+    app: AppHandle,
+    local_path: String,
+    destination_parent: String,
+) -> Result<String, String> {
+    fs_watch::quiet_watch(&app);
+    workspace_store::move_project_entry(
+        &require_current_project(&app)?,
+        &local_path,
+        &destination_parent,
+    )
+}
+
+#[tauri::command]
+fn reveal_in_finder(app: AppHandle, local_path: String) -> Result<(), String> {
+    fs_open::reveal_in_finder(&require_current_project(&app)?, &local_path)
+}
+
+#[tauri::command]
+fn open_in_terminal(app: AppHandle, local_path: String) -> Result<(), String> {
+    fs_open::open_in_terminal(&require_current_project(&app)?, &local_path)
 }
 
 #[tauri::command]
@@ -301,6 +347,65 @@ async fn open_new_project_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_app_settings(app: AppHandle) -> Result<app_settings::AppSettings, String> {
+    app_settings::load(&app)
+}
+
+#[tauri::command]
+fn save_app_settings(
+    app: AppHandle,
+    settings: app_settings::AppSettings,
+) -> Result<app_settings::AppSettings, String> {
+    let settings = app_settings::save(&app, settings)?;
+    app.emit(app_settings::APP_SETTINGS_CHANGED_EVENT, &settings)
+        .map_err(|error| error.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn list_system_fonts() -> Vec<app_settings::SystemFont> {
+    app_settings::list_system_fonts()
+}
+
+async fn open_settings_window(app: AppHandle, section: Option<&str>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
+        window.set_focus().map_err(|error| error.to_string())?;
+        if let Some(section) = section {
+            app.emit(SETTINGS_NAVIGATE_EVENT, section)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let url = match section {
+        Some(section) if !section.is_empty() => format!("index.html?window=settings&section={section}"),
+        _ => "index.html?window=settings".into(),
+    };
+
+    let mut builder = WebviewWindowBuilder::new(
+        &app,
+        SETTINGS_WINDOW_LABEL,
+        WebviewUrl::App(url.into()),
+    )
+    .title("Settings")
+    .inner_size(820.0, 560.0)
+    .min_inner_size(700.0, 460.0)
+    .resizable(true)
+    .maximizable(false)
+    .minimizable(false)
+    .skip_taskbar(false)
+    .background_color(Color(0xf2, 0xf2, 0xf2, 255))
+    .center();
+
+    if let Some(main) = app.get_webview_window("main") {
+        builder = builder.parent(&main).map_err(|error| error.to_string())?;
+    }
+
+    builder.build().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 async fn open_project_settings_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(PROJECT_SETTINGS_WINDOW_LABEL) {
         window.set_focus().map_err(|error| error.to_string())?;
@@ -331,12 +436,17 @@ async fn open_project_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let settings_item = MenuItemBuilder::with_id(MENU_SETTINGS, "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+
     let app_submenu = SubmenuBuilder::new(app, "HyperSpace")
         .about(Some(AboutMetadata {
             name: Some("HyperSpace".into()),
             ..Default::default()
         }))
         .separator()
+        .item(&settings_item)
         .text(MENU_PROJECT_SETTINGS, "项目设置…")
         .separator()
         .services()
@@ -372,6 +482,11 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .select_all()
         .build()?;
 
+    let settings_submenu = SubmenuBuilder::new(app, "Settings")
+        .text(MENU_SETTINGS_TERMINAL, "Terminal Font")
+        .text(MENU_SETTINGS_TAGS, "标签管理")
+        .build()?;
+
     let window_submenu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .separator()
@@ -382,6 +497,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .item(&app_submenu)
         .item(&file_submenu)
         .item(&edit_submenu)
+        .item(&settings_submenu)
         .item(&window_submenu)
         .build()
 }
@@ -390,6 +506,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 pub fn run() {
     tauri::Builder::default()
         .manage(terminal_service::TerminalState::default())
+        .manage(fs_watch::FsWatchState::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -411,6 +528,21 @@ pub fn run() {
                     if let Err(error) = app.emit(OPEN_FOLDER_REQUESTED_EVENT, ()) {
                         eprintln!("Failed to request opening a folder: {error}");
                     }
+                } else if event.id().as_ref() == MENU_SETTINGS
+                    || event.id().as_ref() == MENU_SETTINGS_TERMINAL
+                    || event.id().as_ref() == MENU_SETTINGS_TAGS
+                {
+                    let section = match event.id().as_ref() {
+                        MENU_SETTINGS_TERMINAL => Some("terminal"),
+                        MENU_SETTINGS_TAGS => Some("tags"),
+                        _ => None,
+                    };
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = open_settings_window(app, section).await {
+                            eprintln!("Failed to open Settings window: {error}");
+                        }
+                    });
                 } else if event.id().as_ref() == MENU_PROJECT_SETTINGS {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
@@ -438,8 +570,14 @@ pub fn run() {
             create_workspace_entry,
             rename_workspace_entry,
             delete_workspace_entries,
+            move_workspace_entry,
+            reveal_in_finder,
+            open_in_terminal,
             get_project_settings,
             save_project_settings,
+            get_app_settings,
+            save_app_settings,
+            list_system_fonts,
             import_ssh_key,
             generate_ssh_key,
             delete_ssh_key,

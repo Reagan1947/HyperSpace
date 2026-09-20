@@ -31,9 +31,9 @@
   --color-accent-text: #005bb5;
   --color-green: #39785b;
   --font-code: "JetBrains Mono", "Sarasa Gothic SC", "Sarasa Gothic", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  --scrollbar-thumb: #c9c4bb;
-  --scrollbar-thumb-hover: #aea89e;
-  --scrollbar-thumb-active: #8f897f;
+  --scrollbar-thumb: #c6c6c6;
+  --scrollbar-thumb-hover: #7f7f7f;
+  --scrollbar-thumb-active: #7f7f7f;
 }
 
 * { box-sizing: border-box; }
@@ -78,12 +78,15 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   background-clip: padding-box;
   border: 2px solid transparent;
   border-radius: 999px;
+  transition: background-color 220ms ease;
 }
 *::-webkit-scrollbar-thumb:hover {
   background-color: var(--scrollbar-thumb-hover);
+  transition-duration: 0s;
 }
 *::-webkit-scrollbar-thumb:active {
   background-color: var(--scrollbar-thumb-active);
+  transition-duration: 0s;
 }
 *::-webkit-scrollbar-corner {
   background: transparent;
@@ -272,7 +275,9 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .tree-context-menu button { width: 100%; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: #514d47; cursor: pointer; text-align: left; font-size: 12px; }
 .tree-context-menu button:hover { background: var(--color-bg-hover); }
 .tree-context-menu button.danger { color: #a14e48; }
-.tree-context-menu button > kbd { margin-left: auto; color: #aaa59d; font-size: 10px; }
+.tree-context-menu button > kbd,
+.tree-context-menu button > .menu-trailing { margin-left: auto; flex: 0 0 auto; color: #aaa59d; }
+.tree-context-menu button > kbd { display: inline-flex; align-items: center; font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1; }
 .tree-color-menu { padding: 2px 6px 6px; }
 .tree-color-menu-title { display: block; padding: 1px 2px 6px; color: #77726a; font-size: 11px; }
 .tree-color-palette { display: flex; align-items: center; justify-content: flex-start; gap: 10px; }
@@ -283,9 +288,10 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .tree-context-menu .tree-color-swatch.active::before { outline: 1px solid var(--marker-color); outline-offset: 2px; }
 .tree-context-menu .tree-color-swatch > svg { display: none; }
 .tree-context-menu.is-pointer:not(.canvas-context-menu) button:hover { background: #0071e3; color: #fff; }
-.tree-context-menu.is-pointer:not(.canvas-context-menu) button:hover > kbd { color: #fff; }
+.tree-context-menu.is-pointer:not(.canvas-context-menu) button:hover > kbd,
+.tree-context-menu.is-pointer:not(.canvas-context-menu) button:hover > .menu-trailing { color: #fff; }
 .tree-menu-separator { display: block; height: 1px; margin: 4px 2px; background: var(--color-border-soft); }
-.tree-context-menu button > svg.expanded { margin-left: auto; transform: rotate(90deg); }
+.tree-context-menu button > svg.expanded { transform: rotate(90deg); }
 .tree-tag-editor { margin: 1px 3px 5px; padding: 5px; border: 1px solid #dedbd5; border-radius: 5px; background: #faf9f7; }
 .tree-tag-options { max-height: 126px; overflow-y: auto; }
 .tree-tag-option-row { min-height: 29px; display: flex; align-items: center; gap: 3px; padding-left: 6px; }
@@ -334,6 +340,8 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .tab-overflow-menu { position: absolute; z-index: 40; top: calc(100% + 4px); right: 0; min-width: 180px; max-width: min(280px, 70vw); max-height: min(320px, 50vh); padding: 5px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-canvas); box-shadow: 0 8px 24px #38332c24, 0 2px 6px #38332c12; overflow: auto; }
 .tab-overflow-menu > button { width: 100%; min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: #514d47; cursor: pointer; text-align: left; font-size: 12px; }
 .tab-overflow-menu > button:hover, .tab-overflow-menu > button.active { background: var(--color-bg-hover); }
+.tab-overflow-menu > button > svg { width: 14px; height: 14px; flex: 0 0 auto; color: #89847d; }
+.tab-overflow-menu > button > .tree-node-icon { width: 14px; height: 14px; }
 .tab-overflow-menu > button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-overflow-menu > button > i { width: 20px; height: 20px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 4px; color: #8a857e; font-style: normal; opacity: 0; }
 .tab-overflow-menu > button:hover > i, .tab-overflow-menu > button > i:hover { opacity: 1; }
@@ -428,35 +436,40 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 
 /* Full-bleed so the editor toolbar can span the window; the text column is
    centred further down, on the editing surface itself. */
-.note-page { width: 100%; min-height: 100%; margin: 0; padding: 0 0 100px; }
+.workspace-canvas:has(> .note-page) { overflow: hidden; }
+.note-page { width: 100%; height: 100%; min-height: 0; margin: 0; padding: 0; }
 .empty-view > small { color: var(--color-text-muted); font-size: 10px; }
 .mini-avatar { width: 19px; height: 19px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 50%; background: #e2d7d0; color: #5b514c; font-size: 7px; font-weight: 700; }
-/* The measure every editing surface below centres itself on. */
-.editor { padding-left: 0; --editor-measure: 700px; --editor-gutter: 28px; --editor-column: calc(var(--editor-measure) + var(--editor-gutter) * 2); }
+/* The measure every editing surface below centres itself on. The canvas and
+   scrollbar stay full-bleed so the thumb sits against the right activity rail;
+   only the text column is capped. */
+.editor { width: 100%; height: 100%; min-height: 0; padding-left: 0; --editor-measure: 700px; --editor-gutter: 28px; --editor-column: calc(var(--editor-measure) + var(--editor-gutter) * 2); }
 .editor-loading { min-height: 120px; display: grid; place-items: center; color: var(--color-text-muted); font-size: 12px; }
-.hyperspace-vditor { position: relative; width: 100%; border: 0; background: transparent; }
+.hyperspace-vditor,
+.hyperspace-vditor__host,
+.hyperspace-vditor__mount { width: 100%; height: 100%; min-height: 0; }
+.hyperspace-vditor { position: relative; border: 0; background: transparent; }
 .hyperspace-vditor__host:not(.is-ready) { position: absolute; width: 100%; height: 0; overflow: hidden; visibility: hidden; }
-.hyperspace-vditor__pending { min-height: 320px; max-width: var(--editor-column); margin: 0 auto; padding: 30px var(--editor-gutter) 80px; }
-.hyperspace-vditor__boot { margin: 0; color: #333336; background: transparent; font-family: inherit; font-size: 16px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: break-word; }
+.hyperspace-vditor__pending { width: 100%; max-width: var(--editor-column); min-height: 320px; margin: 0 auto; padding: 30px var(--editor-gutter) 80px; }
+.hyperspace-vditor__boot { margin: 0; color: #1d1d1f; background: transparent; font-family: inherit; font-size: 16px; line-height: 1.75; letter-spacing: 0.01em; white-space: pre-wrap; overflow-wrap: break-word; }
 .hyperspace-vditor__placeholder { margin: 0; color: #9a9590; font-size: 16px; }
 /* .vditor declares its own font stack, which every descendant inherits, and it
    owns the variables the IR markers are painted with. */
-.hyperspace-vditor .vditor { border: 0; background: transparent; font-family: inherit; --second-color: #a9a49c; --heading-border-color: var(--color-border-soft); --blockquote-color: #57534d; --textarea-text-color: #333336; --ir-heading-color: #b0a89c; --ir-bi-color: #b0a89c; --ir-title-color: #9a958e; --ir-link-color: #9a958e; --ir-paren-color: #9a958e; --ir-bracket-color: var(--color-accent); }
+.hyperspace-vditor .vditor { position: relative; width: 100%; height: 100% !important; min-height: 0 !important; border: 0; background: transparent; font-family: inherit; --second-color: #a9a49c; --heading-border-color: #e0e0e0; --blockquote-color: #1d1d1f; --textarea-text-color: #1d1d1f; --ir-heading-color: #b0a89c; --ir-bi-color: #b0a89c; --ir-title-color: #9a958e; --ir-link-color: #9a958e; --ir-paren-color: #9a958e; --ir-bracket-color: var(--color-accent); }
 /* Editor toolbar: same chrome vocabulary as .panel-header and .ide-toolbar. It
    spans the canvas and sticks to the top of it, so it reads as a second bar
    under .workspace-tabs rather than as part of the document.
    !important overrides Vditor's inline padding-left, which tracks the centring
    padding it puts on the editing surface — room this bar has no use for. */
-.hyperspace-vditor .vditor-toolbar { position: sticky; z-index: 8; top: 0; width: 100%; min-height: var(--menubar-height); display: flex; align-items: center; flex-wrap: wrap; gap: 0; padding: 2px 8px !important; border: 0; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
+.hyperspace-vditor .vditor-toolbar { position: sticky; z-index: 8; top: 0; width: 100%; min-height: 24px; display: flex; align-items: center; flex-wrap: wrap; gap: 0; padding: 1px 8px !important; border: 0; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
 .hyperspace-vditor .vditor-toolbar__item { display: flex; flex: 0 0 auto; align-items: center; }
-.hyperspace-vditor .vditor-toolbar__item button { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-icon); cursor: pointer; }
-.hyperspace-vditor .vditor-toolbar__item button svg { width: 14px; height: 14px; display: block; fill: currentColor; }
-.hyperspace-vditor .vditor-toolbar__item button svg.hs-toolbar-icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.hyperspace-vditor .vditor-toolbar__item button:hover { background: var(--color-bg-hover); color: var(--color-text); }
-.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--current { background: var(--color-bg-active); color: var(--color-text) !important; }
+.hyperspace-vditor .vditor-toolbar__item button { width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--color-icon); cursor: pointer; }
+.hyperspace-vditor .vditor-toolbar__item button svg { width: 13px; height: 13px; display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hyperspace-vditor .vditor-toolbar__item button:hover { background: #dfdfdf; color: var(--color-text); }
+.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--current { background: #dfdfdf; color: var(--color-text) !important; }
 .hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled { cursor: default; opacity: .38; }
 .hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled:hover { background: transparent; color: var(--color-icon); }
-.hyperspace-vditor .vditor-toolbar__divider { width: 1px; height: 15px; margin: 0 5px; border: 0; background: var(--color-border); }
+.hyperspace-vditor .vditor-toolbar__divider { width: 1px; height: 13px; margin: 0 4px; border: 0; background: var(--color-border); }
 /* The divider in front of undo becomes the gap that splits the bar: authoring
    tools stay left, the view controls after it are pushed right. */
 .hyperspace-vditor .vditor-toolbar__divider:has(+ .vditor-toolbar__item > button[data-type="undo"]) { min-width: 16px; flex: 1; margin: 0; background: transparent; }
@@ -477,6 +490,28 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-hint > button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hyperspace-vditor .vditor-hint > button > kbd { flex: 0 0 auto; color: #9a958e; font-family: inherit; font-size: 11px; }
 .hyperspace-vditor .vditor-hint > button:hover > kbd { color: inherit; }
+
+/* The floating strip wysiwyg raises over the block under the caret — a table,
+   link, image or code block. It borrows the panel chrome from the dropdowns
+   above and the button metrics from the toolbar, so block controls read as one
+   vocabulary wherever they appear. */
+.hyperspace-vditor .vditor-panel { padding: 3px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-canvas); box-shadow: 0 8px 24px #38332c24, 0 2px 6px #38332c12; color: var(--color-text-muted); font-size: 11px; line-height: 22px; opacity: 1; }
+/* Vditor seats the strip 21px above the block — the height of its own bar, not
+   of this one. Re-seat it on its own height, over the gap the dropdowns use. */
+.hyperspace-vditor .vditor-panel--none { transform: translateY(calc(17px - 100%)); }
+.hyperspace-vditor .vditor-panel .vditor-icon { width: 22px; height: 22px; display: inline-grid; float: none; place-items: center; padding: 0; border-radius: 4px; background: transparent; color: var(--color-icon); vertical-align: middle; }
+.hyperspace-vditor .vditor-panel .vditor-icon svg { width: 14px !important; height: 14px !important; float: none; fill: currentColor; }
+.hyperspace-vditor .vditor-panel .vditor-icon:hover { background: var(--color-bg-hover); color: var(--color-text); }
+.hyperspace-vditor .vditor-panel .vditor-icon--current { background: var(--color-bg-active); color: var(--color-text); }
+/* The row x column steppers are a group of their own, after the actions. */
+.hyperspace-vditor .vditor-panel .vditor-icon + span { margin-left: 5px; }
+.hyperspace-vditor .vditor-panel .vditor-input { height: 22px; padding: 0 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg-content); color: var(--color-text); font-size: 11px; vertical-align: middle; }
+.hyperspace-vditor .vditor-panel .vditor-input:focus { border-color: var(--color-accent); background: var(--color-bg-content); }
+.hyperspace-vditor .vditor-panel .vditor-input::-webkit-inner-spin-button { margin: 0; appearance: none; }
+/* Every control carries a native title (see VditorEditor.tsx); Vditor's own
+   bubble would duplicate it in a palette this app does not use. */
+.hyperspace-vditor .vditor-tooltipped::before,
+.hyperspace-vditor .vditor-tooltipped::after { content: none; }
 /* Vditor's content and code themes are not loaded (see VditorEditor.tsx), so
    everything a document can contain is styled below — there is no fallback. The
    `:not()` chains mirror Vditor's own selectors so these rules win on
@@ -486,36 +521,56 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-wysiwyg,
 .hyperspace-vditor .vditor-sv,
 .hyperspace-vditor .vditor-ir pre.vditor-reset { min-height: 320px; background: transparent !important; }
+
+/* Keep the toolbar outside the scrolling viewport. The full-width content
+   container owns the scrollbar so it starts below the toolbar and sits flush
+   with the right activity rail, not against the centred text column. */
+.hyperspace-vditor .vditor-content { position: absolute; top: 24px; right: 0; bottom: 0; left: 0; width: auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.hyperspace-vditor .vditor-content::-webkit-scrollbar-thumb {
+  border-right: 0;
+  border-radius: 999px 0 0 999px;
+}
+.hyperspace-vditor .vditor-ir,
+.hyperspace-vditor .vditor-wysiwyg,
+.hyperspace-vditor .vditor-preview,
+.hyperspace-vditor .vditor-sv { min-height: 100%; overflow: visible; align-self: flex-start; }
 /* The mode columns run edge to edge so the toolbar above them can too; the
    measure is held by the editing surface inside, which centres itself.
    !important beats Vditor's inline padding (its own centring) and the inline
    max-width it writes onto the preview surface from preview.maxWidth. */
 .hyperspace-vditor .vditor-ir,
 .hyperspace-vditor .vditor-wysiwyg,
-.hyperspace-vditor .vditor-preview { max-width: none; padding: 0 !important; }
-.hyperspace-vditor .vditor-reset { width: 100%; max-width: var(--editor-column) !important; margin: 0 auto; padding: 30px var(--editor-gutter) 80px !important; color: #333336; font-family: inherit; font-size: 16px; line-height: 1.75; letter-spacing: 0; line-break: strict; overflow-wrap: break-word; word-break: normal; }
-/* Vditor zeroes the margin on the editable surfaces from a longer selector. */
+.hyperspace-vditor .vditor-preview { max-width: none !important; padding: 0 !important; }
+.hyperspace-vditor .vditor-reset { width: 100%; max-width: var(--editor-column) !important; height: auto !important; margin: 0 auto; padding: 30px var(--editor-gutter) 80px !important; overflow: visible !important; color: #1d1d1f; font-family: inherit; font-size: 16px; line-height: 1.75; letter-spacing: 0.01em; line-break: strict; overflow-wrap: break-word; word-break: normal; }
+/* Vditor zeroes the margin on the editable surfaces from a longer selector, and
+   sets height: 100% + overflow: auto — that would put the scrollbar on the
+   756px column instead of the full-bleed canvas. */
 .hyperspace-vditor .vditor-ir pre.vditor-reset,
-.hyperspace-vditor .vditor-wysiwyg pre.vditor-reset { margin: 0 auto; }
+.hyperspace-vditor .vditor-wysiwyg pre.vditor-reset { min-height: 100%; margin: 0 auto; overflow: visible !important; height: auto !important; }
 .hyperspace-vditor .vditor-reset > :first-child,
 .hyperspace-vditor .vditor-ir > :first-child,
 .hyperspace-vditor .vditor-wysiwyg > :first-child { margin-top: 0 !important; }
-.hyperspace-vditor .vditor-reset p { margin: 0 0 10px; text-indent: 0; }
+.hyperspace-vditor .vditor-reset > :last-child { margin-bottom: 0; }
+.hyperspace-vditor .vditor-reset p { margin: 0 0 1.1rem; text-indent: 0; }
+.hyperspace-vditor .vditor-ir pre.vditor-reset > p:last-child,
+.hyperspace-vditor .vditor-wysiwyg pre.vditor-reset > p:last-child { min-height: 1.75em; }
 
-/* Headings. Every level is declared so the scale stays monotonic, and the
-   borders come from Vditor's GitHub heritage rather than this design. */
+/* Headings follow the textbook scale; every level keeps the blue accent. */
 .hyperspace-vditor .vditor-reset h1,
 .hyperspace-vditor .vditor-reset h2,
 .hyperspace-vditor .vditor-reset h3,
 .hyperspace-vditor .vditor-reset h4,
 .hyperspace-vditor .vditor-reset h5,
-.hyperspace-vditor .vditor-reset h6 { padding: 0; border: 0; color: var(--color-accent); letter-spacing: 0; }
-.hyperspace-vditor .vditor-reset h1 { margin: 28px 0 10px; font-size: 28px; line-height: 1.35; font-weight: 680; }
-.hyperspace-vditor .vditor-reset h2 { margin: 24px 0 8px; font-size: 22px; line-height: 1.4; font-weight: 650; }
-.hyperspace-vditor .vditor-reset h3 { margin: 18px 0 6px; font-size: 18px; line-height: 1.5; font-weight: 640; }
-.hyperspace-vditor .vditor-reset h4 { margin: 16px 0 6px; font-size: 16px; line-height: 1.55; font-weight: 640; }
-.hyperspace-vditor .vditor-reset h5 { margin: 14px 0 4px; font-size: 14px; line-height: 1.6; font-weight: 640; }
-.hyperspace-vditor .vditor-reset h6 { margin: 14px 0 4px; color: var(--color-text-muted); font-size: 13px; line-height: 1.6; font-weight: 640; }
+.hyperspace-vditor .vditor-reset h6 { padding: 0; border: 0; color: var(--color-accent); scroll-margin-top: 1.5rem; }
+.hyperspace-vditor .vditor-reset h1 { margin: 0 0 1.25rem; font-size: 2rem; line-height: 1.25; font-weight: 600; letter-spacing: -0.02em; }
+.hyperspace-vditor .vditor-reset h2 { margin: 3rem 0 1rem; padding-top: 1.5rem; border-top: 1px solid #e0e0e0; font-size: 1.5rem; line-height: 1.35; font-weight: 600; letter-spacing: -0.02em; }
+.hyperspace-vditor .vditor-reset h3 { margin: 2rem 0 0.75rem; font-size: 1.25rem; line-height: 1.35; font-weight: 600; }
+.hyperspace-vditor .vditor-reset h4 { margin: 1.8rem 0 0.65rem; font-size: 1.06rem; line-height: 1.35; font-weight: 650; }
+.hyperspace-vditor .vditor-reset h5,
+.hyperspace-vditor .vditor-reset h6 { margin: 1.5rem 0 0.5rem; font-size: 0.95rem; line-height: 1.35; font-weight: 650; }
+.hyperspace-vditor .vditor-reset h1 + h2,
+.hyperspace-vditor .vditor-reset h1 + h3,
+.hyperspace-vditor .vditor-reset h2 + h3 { margin-top: 1.4rem; }
 /* IR prints an H1…H6 badge into a left gutter this flush-left layout does not
    reserve, so it would only ever be clipped. */
 .hyperspace-vditor .vditor-ir .vditor-reset > h1::before,
@@ -528,83 +583,122 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-ir div[data-type="footnotes-block"]::before,
 .hyperspace-vditor .vditor-ir .vditor-toc::before { content: none; }
 
+.hyperspace-vditor .vditor-reset strong { font-weight: 650; }
+.hyperspace-vditor .vditor-reset em { font-style: italic; }
+.hyperspace-vditor .vditor-reset del { color: #7a7a7a; text-decoration: line-through; }
+.hyperspace-vditor .vditor-reset mark { color: var(--color-accent); background: #f2f2f4; padding: 0.18em 0.38em; border-radius: 4px; }
 .hyperspace-vditor .vditor-reset ul,
-.hyperspace-vditor .vditor-reset ol { margin: 0 0 10px; padding-left: 1.6em; }
-.hyperspace-vditor .vditor-reset li { margin: 0 0 2px; }
-.hyperspace-vditor .vditor-reset li + li { margin-top: 2px; }
-.hyperspace-vditor .vditor-reset li p { margin-top: 0; }
-.hyperspace-vditor .vditor-reset .vditor-task input { margin: 0 .45em .2em -1.3em; }
-.hyperspace-vditor .vditor-reset a { color: var(--color-accent); text-decoration: none; }
-.hyperspace-vditor .vditor-reset a:hover { text-decoration: underline; }
-.hyperspace-vditor .vditor-reset img { max-width: 100%; border-radius: 6px; }
-.hyperspace-vditor .vditor-reset hr { height: 1px; margin: 22px 0; padding: 0; border: 0; background: var(--color-border); }
-.hyperspace-vditor .vditor-reset kbd { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg-canvas); box-shadow: none; color: var(--color-text); font: 11px/1.4 var(--font-code); }
-.hyperspace-vditor .vditor-reset blockquote { margin: 0 0 10px; padding: 12px 16px; border-left: 3px solid var(--color-accent); border-radius: 0 6px 6px 0; background: #f4f3ef; color: #57534d; }
+.hyperspace-vditor .vditor-reset ol { margin: 0 0 1.25rem; padding-left: 1.6rem; }
+.hyperspace-vditor .vditor-reset ul { list-style: disc; }
+.hyperspace-vditor .vditor-reset ul ul { list-style: circle; }
+.hyperspace-vditor .vditor-reset ul ul ul { list-style: square; }
+.hyperspace-vditor .vditor-reset ol { list-style: decimal; }
+.hyperspace-vditor .vditor-reset li { margin: 0.35rem 0; }
+.hyperspace-vditor .vditor-reset li + li { margin-top: 0.35rem; }
+.hyperspace-vditor .vditor-reset li > ul,
+.hyperspace-vditor .vditor-reset li > ol { margin: 0.25rem 0 0.4rem; }
+.hyperspace-vditor .vditor-reset li p { margin: 0.35rem 0; }
+.hyperspace-vditor .vditor-reset ul:has(> .vditor-task) { padding-left: 0.2rem; list-style: none; }
+.hyperspace-vditor .vditor-reset li.vditor-task { list-style: none; }
+.hyperspace-vditor .vditor-reset .vditor-task { display: flex; gap: 0.5rem; align-items: flex-start; }
+.hyperspace-vditor .vditor-reset .vditor-task input { margin: 0.45em 0 0; }
+.hyperspace-vditor .vditor-reset a { color: var(--color-accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+.hyperspace-vditor .vditor-reset a:hover { color: var(--color-accent-hover); }
+.hyperspace-vditor .vditor-reset img { max-width: 100%; height: auto; display: block; margin: 0.4rem 0 1.2rem; border-radius: 10px; }
+.hyperspace-vditor .vditor-reset hr { height: 0; margin: 2rem 0; padding: 0; border: 0; border-top: 1px solid #e0e0e0; background: transparent; }
+.hyperspace-vditor .vditor-reset kbd { padding: 2px 5px; border: 1px solid #e0e0e0; border-radius: 4px; background: #f5f5f7; box-shadow: none; color: #1d1d1f; font: 11px/1.4 var(--font-code); }
+.hyperspace-vditor .vditor-reset blockquote { margin: 1rem 0 1.35rem; padding: 1rem 1rem 0.5rem; border: 1px solid transparent; border-radius: 8px; background: #f5f5f7; color: #1d1d1f; }
 .hyperspace-vditor .vditor-reset blockquote > :last-child { margin-bottom: 0; }
 
-.hyperspace-vditor .vditor-reset table { width: auto; margin: 0 0 12px; border-collapse: collapse; font-size: 14px; }
+.hyperspace-vditor .vditor-reset table { width: 100%; margin: 0 0 1.35rem; border-collapse: collapse; font-size: 0.95em; line-height: 1.6; }
 .hyperspace-vditor .vditor-reset table tr { border-top: 0; background: transparent; }
 .hyperspace-vditor .vditor-reset table th,
-.hyperspace-vditor .vditor-reset table td { padding: 7px 12px; border: 1px solid var(--color-border); white-space: normal; }
-.hyperspace-vditor .vditor-reset table th { background: #f1efea; font-weight: 640; }
-.hyperspace-vditor .vditor-reset table tbody tr:nth-child(2n) { background: #faf9f6; }
+.hyperspace-vditor .vditor-reset table td { padding: 0.55rem 0.75rem; border: 1px solid #e0e0e0; text-align: left; vertical-align: top; white-space: normal; }
+.hyperspace-vditor .vditor-reset table th { background: #f5f5f7; font-weight: 650; }
+.hyperspace-vditor .vditor-reset table tbody tr:nth-child(even) { background: #f0f0f0; }
 
 /* Code. The box belongs to the <pre> and the <code> is stripped bare, so the
    rendered block and the raw one IR swaps in under the caret look identical. */
-.hyperspace-vditor .vditor-reset code:not(.hljs):not(.highlight-chroma) { padding: 2px 5px; border-radius: 4px; background: #ece9e4; background-image: none; color: #4a4641; font-family: var(--font-code); font-size: .86em; }
+.hyperspace-vditor .vditor-reset code:not(.hljs):not(.highlight-chroma) { padding: 0.18em 0.38em; border-radius: 4px; background: #f2f2f4; background-image: none; color: inherit; font-family: var(--font-code); font-size: 0.875em; }
+.hyperspace-vditor .vditor-reset pre:not(.vditor-reset):not(.hs-embed-host),
 .hyperspace-vditor .vditor-ir__node[data-type="code-block"] > pre:not(.hs-embed-host),
 .hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"] > pre:not(.hs-embed-host),
 .hyperspace-vditor .vditor-wysiwyg pre:not(.vditor-reset):not(.hs-embed-host),
-.hyperspace-vditor .vditor-preview pre:not(.vditor-reset):not(.hs-embed-host) { margin: 12px 0; padding: 12px 14px; border: 0; border-radius: 8px; background: var(--color-bg-code); }
+.hyperspace-vditor .vditor-preview pre:not(.vditor-reset):not(.hs-embed-host) { margin: 1rem 0 1.35rem; padding: 1.25rem 1.25rem 1.1rem; border: 0; border-radius: 8px; background: #f5f5f7; line-height: 1.7; }
 .hyperspace-vditor .vditor-reset pre > code:not(.hljs):not(.highlight-chroma),
-.hyperspace-vditor .vditor-reset pre > code.hljs { padding: 0; border-radius: 0; background: transparent; background-image: none; color: #3a3a3d; font-family: var(--font-code); font-size: 13px; line-height: 1.7; }
+.hyperspace-vditor .vditor-reset pre > code.hljs { display: block; padding: 0; border-radius: 0; background: transparent; background-image: none; color: inherit; font-family: var(--font-code); font-size: 0.86rem; line-height: 1.7; white-space: pre; }
 .hyperspace-vditor .vditor-ir__node[data-type="code-block"]::before,
 .hyperspace-vditor .vditor-ir__node[data-type="code-block"]::after,
 .hyperspace-vditor .vditor-ir__marker--info { color: var(--ir-heading-color); font-family: var(--font-code); font-size: 13px; }
 /* Expanding a block leaves the source <pre> inline, and an inline box whose only
    child is a block paints no background — so it would lose its frame. */
 .hyperspace-vditor .vditor-ir__node--expand > pre.vditor-ir__marker--pre { display: block; }
+/* Vditor stacks an editable fence on top of a highlight preview. Hide the
+   preview only while the caret is inside the block so editing is a single box;
+   idle blocks still render highlight, Mermaid, and HyperSpace cards. */
+.hyperspace-vditor .vditor-ir__node--expand[data-type="code-block"] > .vditor-ir__preview,
+.hyperspace-vditor .vditor-wysiwyg__block[data-type="code-block"] > .vditor-wysiwyg__pre[style*="display: block"] + .vditor-wysiwyg__preview { display: none; }
+/* Vditor animates every marker with transition: all 150ms. On a fenced <pre>
+   that grows from 0×0 to the full block, the swap lags behind the preview hide. */
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"] .vditor-ir__marker { transition: none; }
+/* Collapsed IR still keeps language info + source fence in the tree. Vditor
+   only zeroes the marker box; an inline-block info tag still creates a full
+   line box above the preview (~1× line-height), which reads as a large gap. */
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"]:not(.vditor-ir__node--expand) > .vditor-ir__marker,
+.hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"]:not(.vditor-ir__node--expand) > .vditor-ir__marker {
+  display: none;
+}
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"]:not(.vditor-ir__node--expand)::before,
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"]:not(.vditor-ir__node--expand)::after,
+.hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"]:not(.vditor-ir__node--expand)::before,
+.hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"]:not(.vditor-ir__node--expand)::after { content: none; }
 /* Vditor pins the line-number column with !important padding that assumes the
    <code> keeps its own 1em inset; both ends have to be restated together. */
 .hyperspace-vditor .vditor-reset pre > code.vditor-linenumber { padding-left: 3.2em !important; }
 .hyperspace-vditor .vditor-reset .vditor-linenumber__rows { top: 0; width: 2.2em; }
-.hyperspace-vditor .vditor-reset .vditor-linenumber__rows > span::before { padding-right: .9em; color: #bdb7ad; }
-.hyperspace-vditor .vditor-reset .vditor-copy span { top: 6px; right: 8px; padding: 4px; border-radius: 4px; background: #ffffffd9; }
-.hyperspace-vditor .vditor-reset .vditor-copy svg { color: var(--color-icon); }
+.hyperspace-vditor .vditor-reset .vditor-linenumber__rows > span::before { padding-right: .9em; color: #7a7a7a; }
+.hyperspace-vditor .vditor-reset .vditor-copy span { top: 2px; right: 8px; padding: 0 4px; border-radius: 4px; background: transparent; }
+.hyperspace-vditor .vditor-reset .vditor-copy svg { color: #7a7a7a; }
+
+.hyperspace-vditor .vditor-reset .katex-display,
+.hyperspace-vditor .vditor-reset .language-math { margin: 1rem 0 1.35rem; overflow-x: auto; overflow-y: hidden; }
+.hyperspace-vditor .vditor-reset .language-mermaid { margin: 1rem 0 1.35rem; overflow-x: auto; }
+.hyperspace-vditor .vditor-reset .language-mermaid svg { max-width: 100%; height: auto; }
 
 /* Syntax palette, replacing highlight.js' own theme stylesheet. */
 .hyperspace-vditor .vditor-reset .hljs-comment,
-.hyperspace-vditor .vditor-reset .hljs-quote { color: #8c877f; font-style: italic; }
+.hyperspace-vditor .vditor-reset .hljs-quote { color: #7a7a7a; }
 .hyperspace-vditor .vditor-reset .hljs-keyword,
 .hyperspace-vditor .vditor-reset .hljs-selector-tag,
 .hyperspace-vditor .vditor-reset .hljs-subst,
-.hyperspace-vditor .vditor-reset .hljs-doctag,
 .hyperspace-vditor .vditor-reset .hljs-template-tag,
-.hyperspace-vditor .vditor-reset .hljs-meta { color: #a0356a; }
+.hyperspace-vditor .vditor-reset .hljs-tag,
+.hyperspace-vditor .vditor-reset .hljs-meta { color: #0066cc; }
 .hyperspace-vditor .vditor-reset .hljs-string,
+.hyperspace-vditor .vditor-reset .hljs-doctag,
 .hyperspace-vditor .vditor-reset .hljs-regexp,
-.hyperspace-vditor .vditor-reset .hljs-addition,
-.hyperspace-vditor .vditor-reset .hljs-attribute,
-.hyperspace-vditor .vditor-reset .hljs-selector-attr,
-.hyperspace-vditor .vditor-reset .hljs-selector-pseudo { color: #3c7a4f; }
+.hyperspace-vditor .vditor-reset .hljs-addition { color: #c7366f; }
 .hyperspace-vditor .vditor-reset .hljs-number,
-.hyperspace-vditor .vditor-reset .hljs-literal,
-.hyperspace-vditor .vditor-reset .hljs-variable,
-.hyperspace-vditor .vditor-reset .hljs-template-variable,
-.hyperspace-vditor .vditor-reset .hljs-symbol,
-.hyperspace-vditor .vditor-reset .hljs-bullet { color: #9a5b1f; }
+.hyperspace-vditor .vditor-reset .hljs-literal { color: #c2410c; }
+.hyperspace-vditor .vditor-reset .hljs-built_in,
 .hyperspace-vditor .vditor-reset .hljs-title,
 .hyperspace-vditor .vditor-reset .hljs-section,
 .hyperspace-vditor .vditor-reset .hljs-name,
-.hyperspace-vditor .vditor-reset .hljs-attr,
-.hyperspace-vditor .vditor-reset .hljs-selector-id,
-.hyperspace-vditor .vditor-reset .hljs-selector-class { color: #2f5fbf; }
-.hyperspace-vditor .vditor-reset .hljs-built_in,
 .hyperspace-vditor .vditor-reset .hljs-type,
 .hyperspace-vditor .vditor-reset .hljs-class,
-.hyperspace-vditor .vditor-reset .hljs-formula { color: #1f6d78; }
+.hyperspace-vditor .vditor-reset .hljs-formula { color: #0f766e; }
+.hyperspace-vditor .vditor-reset .hljs-variable,
+.hyperspace-vditor .vditor-reset .hljs-template-variable,
+.hyperspace-vditor .vditor-reset .hljs-attr,
+.hyperspace-vditor .vditor-reset .hljs-attribute,
+.hyperspace-vditor .vditor-reset .hljs-selector-attr,
+.hyperspace-vditor .vditor-reset .hljs-selector-pseudo,
+.hyperspace-vditor .vditor-reset .hljs-selector-id,
+.hyperspace-vditor .vditor-reset .hljs-selector-class,
+.hyperspace-vditor .vditor-reset .hljs-symbol,
+.hyperspace-vditor .vditor-reset .hljs-bullet { color: #6d4aa8; }
 .hyperspace-vditor .vditor-reset .hljs-operator,
-.hyperspace-vditor .vditor-reset .hljs-code { color: #6b6660; }
+.hyperspace-vditor .vditor-reset .hljs-code { color: #1d1d1f; }
 .hyperspace-vditor .vditor-reset .hljs-deletion { color: #b23c3c; }
 .hyperspace-vditor .vditor-reset .hljs-emphasis { font-style: italic; }
 .hyperspace-vditor .vditor-reset .hljs-strong { font-weight: 700; }
@@ -1011,4 +1105,412 @@ body.new-project-window textarea {
 .new-project-window-shell .modal-field input {
   box-sizing: border-box;
   max-width: 100%;
+}
+
+html.settings-window,
+body.settings-window,
+body.settings-window #root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+  background: #f2f2f2;
+}
+
+body.settings-window {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body.settings-window input,
+body.settings-window select,
+body.settings-window textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.settings-window-shell {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 228px minmax(0, 1fr);
+  background: #f2f2f2;
+}
+
+.settings-sidebar {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-content);
+}
+
+.settings-search {
+  height: 28px;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 10px 8px;
+  padding: 0 8px;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--color-text-muted);
+}
+
+.settings-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12px;
+  outline: none;
+}
+
+.settings-nav {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding: 2px 0 12px;
+  overflow: auto;
+  outline: none;
+}
+
+.settings-tree-folder {
+  padding-left: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  touch-action: auto;
+}
+
+.settings-tree-leaf {
+  padding-left: 28px;
+  text-align: left;
+  cursor: pointer;
+  touch-action: auto;
+}
+
+.settings-nav .tree-item:hover:not(.selected) {
+  background: var(--color-bg-hover);
+}
+
+.settings-nav button.tree-item:focus,
+.settings-nav button.tree-item:focus-visible {
+  outline: none;
+}
+
+.settings-nav button.tree-item:focus-visible:not(.selected) {
+  box-shadow: inset 0 0 0 1px #0071e366;
+}
+
+.settings-nav .tree-item.selected {
+  background: #0071e3;
+  color: #fff;
+}
+
+.settings-nav .tree-item.selected .tree-chevron {
+  color: #fff;
+}
+
+.settings-empty,
+.settings-content-empty {
+  margin: 8px 12px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 22px 28px 16px;
+}
+
+.settings-pane-header {
+  margin-bottom: 18px;
+}
+
+.settings-pane-header h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.settings-pane-header p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #e4e4e4;
+  border-radius: 10px;
+  background: #fbfbfb;
+}
+
+.settings-field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-field > span {
+  color: #514d47;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-field select,
+.settings-stepper input {
+  height: 30px;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.settings-field select {
+  width: 100%;
+  padding: 0 8px;
+}
+
+.settings-stepper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-stepper input {
+  width: 64px;
+  padding: 0 8px;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.settings-stepper input::-webkit-outer-spin-button,
+.settings-stepper input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.settings-stepper button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #625e58;
+  cursor: pointer;
+}
+
+.settings-stepper button:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.settings-stepper button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-stepper-unit {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.settings-preview {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settings-preview > span {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.settings-preview pre {
+  min-height: 112px;
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border-radius: 10px;
+  background: #1f1f1f;
+  color: #d8d8d8;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.settings-status {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  margin-top: auto;
+  padding-top: 12px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.settings-status .modal-error {
+  width: 100%;
+}
+
+.settings-tag-create {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.settings-tag-create input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.settings-tag-create button {
+  height: 30px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: 6px;
+  background: var(--color-accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.settings-tag-create button:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.settings-tag-create button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-tag-empty {
+  padding: 18px 14px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 10px;
+  background: #fbfbfb;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-tag-list {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid #e4e4e4;
+  border-radius: 10px;
+  background: #fbfbfb;
+}
+
+.settings-tag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid #eee;
+}
+
+.settings-tag-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-tag-row.editing {
+  background: #fff;
+}
+
+.settings-tag-name,
+.settings-tag-rename {
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 280px;
+}
+
+.settings-tag-name {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-tag-rename {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--color-accent);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--color-text);
+  font-size: 12px;
+}
+
+.settings-tag-usage {
+  margin-right: auto;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.settings-tag-row > button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-icon);
+  cursor: pointer;
+}
+
+.settings-tag-row > button:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.settings-tag-row > button.danger:hover {
+  background: #f3dfdc;
+  color: #a14e48;
 }

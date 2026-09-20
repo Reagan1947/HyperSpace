@@ -2,13 +2,20 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { NewProjectWindow } from "./NewProjectDialog";
+import { SettingsWindow } from "./SettingsWindow";
 import "./styles.css";
 
 const params = new URLSearchParams(window.location.search);
-const isNewProjectWindow = params.get("window") === "new-project";
+const windowType = params.get("window");
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {isNewProjectWindow ? <NewProjectWindow /> : <App />}
+    {windowType === "new-project" ? (
+      <NewProjectWindow />
+    ) : windowType === "settings" ? (
+      <SettingsWindow />
+    ) : (
+      <App />
+    )}
   </StrictMode>,
 );

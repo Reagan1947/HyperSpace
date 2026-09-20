@@ -40,7 +40,7 @@ import {
   X,
 } from "lucide-react";
 import { createBlankWorkspace, initialWorkspace } from "./data";
-import { FileTree } from "./FileTree";
+import { FileTree, FileNodeIcon } from "./FileTree";
 import type { FileTreeHandle } from "./FileTree";
 import { headingPath, headingSiblings, parseMarkdownHeadings, type MarkdownHeading } from "./markdownNavigation";
 import { TerminalPanel } from "./TerminalPanel";
@@ -54,6 +54,7 @@ import {
   getGitRepositoryInfo,
   importPdf,
   loadWorkspace,
+  moveWorkspaceEntry,
   openProject,
   projectNameFromPath,
   renameWorkspaceEntry,
@@ -63,6 +64,23 @@ import {
   type WorkspaceSearchResult,
 } from "./storage";
 import type { ContentNode, MarkerColor, TagDefinition, WorkspaceState } from "./types";
+import {
+  dirtyMarkdownNodeIds,
+  markdownEquals,
+  mergeScannedWorkspace,
+  opensInWorkspace,
+  pruneOpenTabs,
+  resolveMoveDestination,
+  WORKSPACE_TREE_CHANGED_EVENT,
+} from "./workspaceSync";
+import {
+  WORKSPACE_TAGS_CHANGED_EVENT,
+  WORKSPACE_TAGS_MUTATE_EVENT,
+  WORKSPACE_TAGS_REQUEST_EVENT,
+  applyTagCatalog,
+  workspaceTagsSnapshot,
+  type WorkspaceTagsMutation,
+} from "./workspaceTags";
 
 type SyncStatus = "loading" | "saved" | "saving" | "offline";
 type PrimaryLeftTool = "project" | "commit" | "pullRequests";
@@ -103,6 +121,11 @@ function isMarkdownDocument(node: ContentNode) {
   return node.kind === "file" && (fileType === "md" || fileType === "markdown");
 }
 
+function parentIdForTreeTarget(nodes: ContentNode[], targetId: string, fallback: ContentNode) {
+  const node = nodes.find((item) => item.id === targetId) ?? fallback;
+  return node.kind === "folder" ? node.id : node.parentId;
+}
+
 function parentDirectoryPath(parent: ContentNode | undefined) {
   if (!parent) return "";
   if (parent.kind === "folder") return parent.localPath ?? "";
@@ -132,11 +155,13 @@ function ProjectSidebar({
   activeNodeId,
   projectName,
   projectPath,
+  pendingRenameId,
   onSelect,
   onRevealActive,
   onCreatePage,
   onCreateNode,
   onRenameNode,
+  onPendingRenameHandled,
   onSetNodeMarkerColor,
   onSetNodeTags,
   onCreateTag,
@@ -150,11 +175,13 @@ function ProjectSidebar({
   activeNodeId: string;
   projectName: string;
   projectPath: string | null;
+  pendingRenameId: string | null;
   onSelect: (id: string) => void;
   onRevealActive: () => void;
   onCreatePage: () => void;
   onCreateNode: (kind: "page" | "folder", parentId: string | null) => void;
   onRenameNode: (id: string, title: string) => void;
+  onPendingRenameHandled: () => void;
   onSetNodeMarkerColor: (id: string, color?: MarkerColor) => void;
   onSetNodeTags: (id: string, tagIds: string[]) => void;
   onCreateTag: (nodeId: string, name: string) => void;
@@ -298,6 +325,8 @@ function ProjectSidebar({
         onSelect={onSelect}
         onCreate={onCreateNode}
         onRename={onRenameNode}
+        pendingRenameId={pendingRenameId}
+        onPendingRenameHandled={onPendingRenameHandled}
         onSetMarkerColor={onSetNodeMarkerColor}
         onSetTags={onSetNodeTags}
         onCreateTag={onCreateTag}
@@ -633,7 +662,7 @@ function WorkspaceTabBar({
             tabIndex={-1}
             type="button"
           >
-            <NodeIcon node={tab} size={15} />
+            <FileNodeIcon node={tab} />
             <span>{tab.title}</span>
             <i><X size={11} /></i>
           </button>
@@ -651,7 +680,7 @@ function WorkspaceTabBar({
             className={`document-tab ${tab.id === activeId ? "active" : ""}`}
             onClick={() => onSelect(tab.id)}
           >
-            <NodeIcon node={tab} size={15} />
+            <FileNodeIcon node={tab} />
             <span>{tab.title}</span>
             <i
               role="button"
@@ -697,7 +726,7 @@ function WorkspaceTabBar({
                     setMenuOpen(false);
                   }}
                 >
-                  <NodeIcon node={tab} size={14} />
+                  <FileNodeIcon node={tab} />
                   <span>{tab.title}</span>
                   <i
                     role="button"
@@ -892,6 +921,7 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(316);
   const [openTabIds, setOpenTabIds] = useState<string[]>([initialWorkspace.selectedNodeId]);
   const [treeSelectedId, setTreeSelectedId] = useState(initialWorkspace.selectedNodeId);
+  const [pendingRenameId, setPendingRenameId] = useState<string | null>(null);
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [gitInfo, setGitInfo] = useState<GitRepositoryInfo>(emptyGitInfo);
   const [gitLoading, setGitLoading] = useState(false);
@@ -899,6 +929,21 @@ function App() {
   const [commitMessage, setCommitMessage] = useState("");
   const [indexedSearchResults, setIndexedSearchResults] = useState<WorkspaceSearchResult[] | null>(null);
   const hydrated = useRef(false);
+  const syncedMarkdownRef = useRef<Record<string, string>>({});
+  const syncedReadyRef = useRef(false);
+  const saveGenerationRef = useRef(0);
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+
+  function captureSyncedMarkdown(markdown: Record<string, string>) {
+    syncedMarkdownRef.current = { ...markdown };
+    syncedReadyRef.current = true;
+  }
+
+  function currentDirtyMarkdownIds(noteMarkdown: Record<string, string>) {
+    if (!syncedReadyRef.current) return [];
+    return dirtyMarkdownNodeIds(noteMarkdown, syncedMarkdownRef.current);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -911,18 +956,20 @@ function App() {
           const opened = await openProject(path).catch(() => null);
           if (cancelled) return;
           if (opened) {
+            captureSyncedMarkdown(opened.noteMarkdown);
             setWorkspace(opened);
             setTreeSelectedId(opened.selectedNodeId);
-            setOpenTabIds([opened.selectedNodeId]);
+            setOpenTabIds(pruneOpenTabs([opened.selectedNodeId], opened.nodes));
             return;
           }
         }
         const stored = await loadWorkspace();
         if (cancelled) return;
         if (stored) {
+          captureSyncedMarkdown(stored.noteMarkdown);
           setWorkspace(stored);
           setTreeSelectedId(stored.selectedNodeId);
-          setOpenTabIds([stored.selectedNodeId]);
+          setOpenTabIds(pruneOpenTabs([stored.selectedNodeId], stored.nodes));
         }
       } finally {
         if (!cancelled) {
@@ -1004,12 +1051,111 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      return listen<WorkspaceState>(WORKSPACE_TREE_CHANGED_EVENT, (event) => {
+        const scanned = event.payload;
+        if (!Array.isArray(scanned?.nodes)) return;
+        setWorkspace((current) => {
+          const dirtyIds = currentDirtyMarkdownIds(current.noteMarkdown);
+          const dirty = new Set(dirtyIds);
+          const next = mergeScannedWorkspace(current, scanned, dirtyIds);
+          if (syncedReadyRef.current) {
+            const synced = { ...syncedMarkdownRef.current };
+            for (const [id, value] of Object.entries(scanned.noteMarkdown ?? {})) {
+              if (!dirty.has(id)) synced[id] = value;
+            }
+            const scannedIds = new Set(scanned.nodes.map((node) => node.id));
+            for (const id of Object.keys(synced)) {
+              if (!scannedIds.has(id) && !dirty.has(id)) delete synced[id];
+            }
+            syncedMarkdownRef.current = synced;
+          }
+          return next;
+        });
+        setOpenTabIds((current) => pruneOpenTabs(current, scanned.nodes));
+        setTreeSelectedId((current) => scanned.nodes.some((node) => node.id === current)
+          ? current
+          : scanned.selectedNodeId || scanned.nodes[0]?.id || "");
+      }).then((stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      });
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    void import("@tauri-apps/api/event").then(async ({ emit, listen }) => {
+      if (disposed) return;
+      const stopMutate = await listen<WorkspaceTagsMutation>(WORKSPACE_TAGS_MUTATE_EVENT, (event) => {
+        const nextTags = event.payload?.tags;
+        if (!Array.isArray(nextTags)) return;
+        setWorkspace((current) => applyTagCatalog(current, nextTags, event.payload.removedTagIds ?? []));
+      });
+      const stopRequest = await listen(WORKSPACE_TAGS_REQUEST_EVENT, () => {
+        void emit(WORKSPACE_TAGS_CHANGED_EVENT, workspaceTagsSnapshot(workspaceRef.current));
+      });
+      if (disposed) {
+        stopMutate();
+        stopRequest();
+        return;
+      }
+      unlisteners.push(stopMutate, stopRequest);
+    });
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((stop) => stop());
+    };
+  }, []);
+
+  const tagSyncKey = useMemo(
+    () => JSON.stringify(workspaceTagsSnapshot(workspace)),
+    [workspace.nodes, workspace.tags],
+  );
+
+  useEffect(() => {
     if (!hydrated.current) return;
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const snapshot = JSON.parse(tagSyncKey) as ReturnType<typeof workspaceTagsSnapshot>;
+    void import("@tauri-apps/api/event").then(({ emit }) => {
+      void emit(WORKSPACE_TAGS_CHANGED_EVENT, snapshot);
+    });
+  }, [tagSyncKey]);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
+    const generation = ++saveGenerationRef.current;
+    const snapshot = workspace;
     setSyncStatus(navigator.onLine ? "saving" : "offline");
     const timer = window.setTimeout(() => {
-      void saveWorkspace({ ...workspace, lastSavedAt: new Date().toISOString() })
-        .then(() => setSyncStatus(navigator.onLine ? "saved" : "offline"))
-        .catch(() => setSyncStatus("offline"));
+      void saveWorkspace({ ...snapshot, lastSavedAt: new Date().toISOString() })
+        .then(() => {
+          if (saveGenerationRef.current !== generation) return;
+          captureSyncedMarkdown(snapshot.noteMarkdown);
+          setSyncStatus(navigator.onLine ? "saved" : "offline");
+        })
+        .catch(() => {
+          if (saveGenerationRef.current === generation) setSyncStatus("offline");
+        });
     }, 500);
     return () => window.clearTimeout(timer);
   }, [workspace]);
@@ -1056,12 +1202,22 @@ function App() {
     };
   }, [projectPath, query, workspace.lastSavedAt]);
 
-  const selected = workspace.nodes.find((node) => node.id === workspace.selectedNodeId) ?? workspace.nodes[0];
+  const selected = (() => {
+    const byId = (id: string | undefined) => workspace.nodes.find((node) => node.id === id);
+    const current = byId(workspace.selectedNodeId);
+    if (opensInWorkspace(current)) return current;
+    for (let index = openTabIds.length - 1; index >= 0; index -= 1) {
+      const tab = byId(openTabIds[index]);
+      if (opensInWorkspace(tab)) return tab;
+    }
+    return workspace.nodes.find(opensInWorkspace)
+      ?? { id: "", parentId: null, kind: "folder" as const, title: projectNameFromPath(projectPath), updatedAt: "" };
+  })();
   const selectedReadOnly = lockedNodeIds.includes(selected.id);
   const projectName = projectNameFromPath(projectPath);
   const openTabs = openTabIds
     .map((id) => workspace.nodes.find((node) => node.id === id))
-    .filter((node): node is ContentNode => Boolean(node));
+    .filter(opensInWorkspace);
   const fallbackSearchResults = useMemo<WorkspaceSearchResult[]>(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return [];
@@ -1148,21 +1304,33 @@ function App() {
   }
 
   function selectNode(id: string) {
+    const node = workspace.nodes.find((item) => item.id === id);
+    if (!opensInWorkspace(node)) {
+      if (node?.kind === "folder") {
+        setTreeSelectedId(id);
+        setPrimaryLeftTool("project");
+      }
+      return;
+    }
     setWorkspace((current) => ({ ...current, selectedNodeId: id }));
     setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
   }
 
   function selectFromTree(id: string) {
     setTreeSelectedId(id);
-    selectNode(id);
+    const node = workspace.nodes.find((item) => item.id === id);
+    if (!opensInWorkspace(node)) return;
+    setWorkspace((current) => ({ ...current, selectedNodeId: id }));
+    setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
   }
 
   function handleProjectCreated(nextWorkspace: WorkspaceState, nextProjectPath: string) {
     hydrated.current = true;
+    captureSyncedMarkdown(nextWorkspace.noteMarkdown);
     setProjectPath(nextProjectPath);
     setWorkspace(nextWorkspace);
     setTreeSelectedId(nextWorkspace.selectedNodeId);
-    setOpenTabIds([nextWorkspace.selectedNodeId]);
+    setOpenTabIds(pruneOpenTabs([nextWorkspace.selectedNodeId], nextWorkspace.nodes));
     setLockedNodeIds([]);
     setQuery("");
     setSyncStatus(navigator.onLine ? "saved" : "offline");
@@ -1222,7 +1390,7 @@ function App() {
       });
       if (typeof selectedPath !== "string" || !selectedPath) return;
       const imported = await importPdf(selectedPath);
-      const parentId = selected.kind === "folder" ? selected.id : selected.parentId;
+      const parentId = parentIdForTreeTarget(workspace.nodes, treeSelectedId, selected);
       const node: ContentNode = {
         id: imported.id,
         parentId,
@@ -1281,15 +1449,18 @@ function App() {
   }
 
   function updateDocument(pageId: string, markdown: string) {
-    setWorkspace((current) => ({
-      ...current,
-      noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
-    }));
+    setWorkspace((current) => {
+      const existing = current.noteMarkdown[pageId] ?? "";
+      if (markdownEquals(existing, markdown)) return current;
+      return {
+        ...current,
+        noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
+      };
+    });
   }
 
   function createPage() {
-    const parentId = selected.kind === "folder" ? selected.id : selected.parentId;
-    void createNode("page", parentId);
+    void createNode("page", parentIdForTreeTarget(workspace.nodes, treeSelectedId, selected));
   }
 
   async function createNode(kind: "page" | "folder", parentId: string | null) {
@@ -1311,12 +1482,14 @@ function App() {
         };
         setWorkspace((current) => ({
           ...current,
-          selectedNodeId: node.id,
+          selectedNodeId: opensInWorkspace(node) ? node.id : current.selectedNodeId,
           nodes: [...current.nodes, node],
           noteMarkdown: node.kind === "file" ? { ...current.noteMarkdown, [node.id]: "" } : current.noteMarkdown,
         }));
-        setOpenTabIds((current) => [...current, node.id]);
+        if (opensInWorkspace(node)) setOpenTabIds((current) => [...current, node.id]);
         setTreeSelectedId(node.id);
+        setPendingRenameId(node.id);
+        setPrimaryLeftTool("project");
       } catch (error) {
         window.alert(error instanceof Error ? error.message : String(error));
       }
@@ -1330,22 +1503,25 @@ function App() {
     );
     const localPath = parentPath ? `${parentPath}/${title}` : title;
     const id = `${kind === "folder" ? "folder" : "file"}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const node: ContentNode = {
+      id,
+      parentId,
+      kind: kind === "folder" ? "folder" : "file",
+      title,
+      fileType: kind === "folder" ? undefined : "MD",
+      localPath,
+      updatedAt: "刚刚",
+    };
     setWorkspace((current) => ({
       ...current,
-      selectedNodeId: id,
-      nodes: [...current.nodes, {
-        id,
-        parentId,
-        kind: kind === "folder" ? "folder" : "file",
-        title,
-        fileType: kind === "folder" ? undefined : "MD",
-        localPath,
-        updatedAt: "刚刚",
-      }],
+      selectedNodeId: opensInWorkspace(node) ? id : current.selectedNodeId,
+      nodes: [...current.nodes, node],
       noteMarkdown: kind === "page" ? { ...current.noteMarkdown, [id]: "" } : current.noteMarkdown,
     }));
-    setOpenTabIds((current) => [...current, id]);
+    if (opensInWorkspace(node)) setOpenTabIds((current) => [...current, id]);
     setTreeSelectedId(id);
+    setPendingRenameId(id);
+    setPrimaryLeftTool("project");
   }
 
   async function renameNode(id: string, title: string) {
@@ -1431,22 +1607,60 @@ function App() {
     }));
   }
 
-  function moveNodes(ids: string[], parentId: string | null, index: number) {
+  async function moveNodes(ids: string[], parentId: string | null, index: number) {
+    const destination = resolveMoveDestination(workspace.nodes, parentId);
+    const pathUpdates = new Map<string, string>();
+    if (projectPath && "__TAURI_INTERNALS__" in window) {
+      try {
+        for (const id of ids) {
+          const node = workspace.nodes.find((item) => item.id === id);
+          if (!node?.localPath) continue;
+          const currentDir = node.localPath.includes("/")
+            ? node.localPath.slice(0, node.localPath.lastIndexOf("/"))
+            : "";
+          if (currentDir === destination.parentPath) continue;
+          pathUpdates.set(node.localPath, await moveWorkspaceEntry(node.localPath, destination.parentPath));
+        }
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+
     setWorkspace((current) => {
       const movingIds = new Set(ids);
       const moving = ids
         .map((id) => current.nodes.find((node) => node.id === id))
         .filter((node): node is ContentNode => Boolean(node))
-        .map((node) => ({ ...node, parentId, updatedAt: "刚刚" }));
-      const remaining = current.nodes.filter((node) => !movingIds.has(node.id));
-      const siblings = remaining.filter((node) => node.parentId === parentId);
+        .map((node) => {
+          const nextPath = node.localPath ? pathUpdates.get(node.localPath) ?? node.localPath : node.localPath;
+          return {
+            ...node,
+            parentId: destination.parentId,
+            localPath: nextPath,
+            title: nextPath?.split("/").pop() ?? node.title,
+            updatedAt: "刚刚",
+          };
+        });
+      const remaining = current.nodes
+        .filter((node) => !movingIds.has(node.id))
+        .map((node) => {
+          if (!node.localPath) return node;
+          for (const [previousPath, nextPath] of pathUpdates) {
+            if (node.localPath.startsWith(`${previousPath}/`)) {
+              return { ...node, localPath: `${nextPath}${node.localPath.slice(previousPath.length)}` };
+            }
+          }
+          return node;
+        });
+      const siblings = remaining.filter((node) => node.parentId === destination.parentId);
       const anchor = siblings[index];
       const insertionPoint = anchor
         ? remaining.findIndex((node) => node.id === anchor.id)
         : siblings.length > 0
           ? remaining.findIndex((node) => node.id === siblings.at(-1)?.id) + 1
-          : parentId
-            ? remaining.findIndex((node) => node.id === parentId) + 1
+          : destination.parentId
+            ? remaining.findIndex((node) => node.id === destination.parentId) + 1
             : remaining.length;
       const nextNodes = [...remaining];
       nextNodes.splice(Math.max(0, insertionPoint), 0, ...moving);
@@ -1481,28 +1695,16 @@ function App() {
         return;
       }
     }
-    const fallbackId = `page-${Date.now()}-fallback`;
-    const leavesWorkspaceEmpty = workspace.nodes.every((node) => allIds.has(node.id));
+    const remainingId = workspace.nodes.find((node) => !allIds.has(node.id))?.id ?? "";
 
     setWorkspace((current) => {
       const remainingNodes = current.nodes.filter((node) => !allIds.has(node.id));
-      const nodes = remainingNodes.length > 0 ? remainingNodes : [{
-        id: fallbackId,
-        parentId: null,
-        kind: "page" as const,
-        title: "未命名页面",
-        updatedAt: "刚刚",
-      }];
       const remainingMarkdown = Object.fromEntries(Object.entries(current.noteMarkdown).filter(([id]) => !allIds.has(id)));
-      const noteMarkdown = remainingNodes.length > 0 ? remainingMarkdown : { ...remainingMarkdown, [fallbackId]: "" };
-      const selectedNodeId = allIds.has(current.selectedNodeId) ? nodes[0]?.id ?? "" : current.selectedNodeId;
-      return { ...current, nodes, noteMarkdown, selectedNodeId };
+      const selectedNodeId = allIds.has(current.selectedNodeId) ? remainingNodes[0]?.id ?? "" : current.selectedNodeId;
+      return { ...current, nodes: remainingNodes, noteMarkdown: remainingMarkdown, selectedNodeId };
     });
-    setOpenTabIds((current) => {
-      const remaining = current.filter((id) => !allIds.has(id));
-      return leavesWorkspaceEmpty ? [fallbackId] : remaining;
-    });
-    setTreeSelectedId((current) => allIds.has(current) ? (leavesWorkspaceEmpty ? fallbackId : workspace.nodes.find((node) => !allIds.has(node.id))?.id ?? "") : current);
+    setOpenTabIds((current) => current.filter((id) => !allIds.has(id)));
+    setTreeSelectedId((current) => allIds.has(current) ? remainingId : current);
   }
 
   const syncCopy = syncStatus === "loading" ? "读取本地数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "offline" ? "离线模式" : "已保存到本地";
@@ -1557,6 +1759,8 @@ function App() {
               onCreatePage={createPage}
               onCreateNode={createNode}
               onRenameNode={renameNode}
+              pendingRenameId={pendingRenameId}
+              onPendingRenameHandled={() => setPendingRenameId(null)}
               onSetNodeMarkerColor={setNodeMarkerColor}
               onSetNodeTags={setNodeTags}
               onCreateTag={createTag}

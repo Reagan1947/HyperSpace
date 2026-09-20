@@ -16,6 +16,7 @@ const VDITOR_MIGRATION_DIR: &str = "migrations/pre-vditor";
 const MAX_SCANNED_NODES: usize = 20_000;
 const NEW_PAGE_FILE_NAME: &str = "未命名页面.md";
 const NEW_FOLDER_NAME: &str = "新建文件夹";
+const ASSETS_DIRECTORY_NAME: &str = ".assets";
 const IGNORED_DIRECTORY_NAMES: &[&str] = &[
     ".git",
     ".hyperspace",
@@ -88,6 +89,19 @@ fn project_file(project_path: &Path, relative_path: &str) -> Result<PathBuf, Str
         ));
     }
     Ok(canonical_target)
+}
+
+/// Resolves a workspace-relative path to an existing absolute path.
+/// An empty `local_path` is the project root.
+pub(crate) fn resolve_existing_project_path(
+    project_path: &Path,
+    local_path: &str,
+) -> Result<PathBuf, String> {
+    let trimmed = local_path.trim();
+    if trimmed.is_empty() {
+        return fs::canonicalize(project_path).map_err(|error| error.to_string());
+    }
+    project_file(project_path, trimmed)
 }
 
 fn value_string(value: Option<&Value>) -> String {
@@ -238,10 +252,7 @@ fn scan_directory(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if file_type.is_dir() && IGNORED_DIRECTORY_NAMES.contains(&name.as_str()) {
+        if should_skip_entry(&name, file_type.is_dir()) {
             continue;
         }
         let path = entry.path();
@@ -314,7 +325,48 @@ fn scan_directory(
     Ok(())
 }
 
-pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, String> {
+fn is_allowed_hidden_directory(name: &str) -> bool {
+    name == ASSETS_DIRECTORY_NAME
+}
+
+fn should_skip_entry(name: &str, is_dir: bool) -> bool {
+    if is_dir && is_allowed_hidden_directory(name) {
+        return false;
+    }
+    name.starts_with('.')
+        || name.ends_with(".tmp")
+        || (is_dir && IGNORED_DIRECTORY_NAMES.contains(&name))
+}
+
+fn validate_entry_name(name: &str, is_dir: bool) -> Result<(), String> {
+    let name_path = Path::new(name);
+    if name.is_empty()
+        || name_path.components().count() != 1
+        || !matches!(
+            name_path.components().next(),
+            Some(Component::Normal(_))
+        )
+        || (name.starts_with('.') && !(is_dir && is_allowed_hidden_directory(name)))
+    {
+        return Err("文件名不能为空、不能以点开头，也不能包含路径分隔符".into());
+    }
+    Ok(())
+}
+
+pub fn is_ignored_fs_event(project_path: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_path) else {
+        return true;
+    };
+    if relative.as_os_str().is_empty() {
+        return false;
+    }
+    relative.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        should_skip_entry(&name, true)
+    })
+}
+
+pub fn scan_project_workspace(project_path: &Path) -> Result<Value, String> {
     let loaded = load_project_workspace(project_path)?;
     let mut workspace = loaded
         .as_deref()
@@ -361,7 +413,7 @@ pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, Str
         &existing_by_identity,
         &mut scanned_nodes,
     )?;
-    let (first_node_id, is_empty) = {
+    let first_node_id = {
         let nodes = workspace
             .as_object_mut()
             .ok_or_else(|| "Workspace must be a JSON object".to_string())?
@@ -370,10 +422,7 @@ pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, Str
             .as_array_mut()
             .ok_or_else(|| "Workspace nodes must be an array".to_string())?;
         nodes.extend(scanned_nodes);
-        (
-            nodes.first().and_then(|node| node.get("id")).cloned(),
-            nodes.is_empty(),
-        )
+        nodes.first().and_then(|node| node.get("id")).cloned()
     };
 
     let markdown_files = workspace
@@ -429,6 +478,29 @@ pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, Str
             workspace["selectedNodeId"] = id;
         }
     }
+    let valid_ids = workspace
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| node.get("id")?.as_str().map(str::to_string))
+        .collect::<HashSet<_>>();
+    if let Some(note_markdown) = workspace
+        .get_mut("noteMarkdown")
+        .and_then(Value::as_object_mut)
+    {
+        note_markdown.retain(|id, _| valid_ids.contains(id));
+    }
+    Ok(workspace)
+}
+
+pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, String> {
+    let workspace = scan_project_workspace(project_path)?;
+    let is_empty = workspace
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(Vec::is_empty)
+        .unwrap_or(true);
     if is_empty {
         return Ok(None);
     }
@@ -461,17 +533,7 @@ pub fn rename_project_entry(
 ) -> Result<String, String> {
     let source = safe_project_entry(project_path, relative_path)?;
     let normalized = new_name.trim();
-    let name_path = Path::new(normalized);
-    if normalized.is_empty()
-        || normalized.starts_with('.')
-        || name_path.components().count() != 1
-        || !matches!(
-            name_path.components().next(),
-            Some(std::path::Component::Normal(_))
-        )
-    {
-        return Err("文件名不能为空、不能以点开头，也不能包含路径分隔符".into());
-    }
+    validate_entry_name(normalized, source.is_dir())?;
     let destination = source
         .parent()
         .ok_or_else(|| "无法重命名项目根目录".to_string())?
@@ -508,6 +570,46 @@ pub fn delete_project_entries(
         .map_err(|error| format!("删除 {} 失败：{error}", path.display()))?;
     }
     Ok(())
+}
+
+pub fn move_project_entry(
+    project_path: &Path,
+    relative_path: &str,
+    destination_parent: &str,
+) -> Result<String, String> {
+    let source = safe_project_entry(project_path, relative_path)?;
+    let destination_dir = parent_directory(project_path, destination_parent)?;
+    let source_canonical = fs::canonicalize(&source).map_err(|error| error.to_string())?;
+    let destination_canonical =
+        fs::canonicalize(&destination_dir).map_err(|error| error.to_string())?;
+    if source_canonical == destination_canonical {
+        return Err("不能将文件夹移动到自身".into());
+    }
+    if source.is_dir() && destination_canonical.starts_with(&source_canonical) {
+        return Err("不能将文件夹移动到自身内部".into());
+    }
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "无法移动项目根目录".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    if source
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .as_ref()
+        == Some(&destination_canonical)
+    {
+        return Ok(relative_path.replace('\\', "/"));
+    }
+    let unique_name = unique_name_in(&destination_dir, &file_name);
+    let destination = destination_dir.join(&unique_name);
+    fs::rename(&source, &destination).map_err(|error| format!("移动失败：{error}"))?;
+    let parent = destination_parent.trim().replace('\\', "/");
+    if parent.is_empty() {
+        Ok(unique_name)
+    } else {
+        Ok(format!("{parent}/{unique_name}"))
+    }
 }
 
 fn parent_directory(project_path: &Path, parent_relative_path: &str) -> Result<PathBuf, String> {
@@ -562,17 +664,7 @@ pub fn create_project_entry(
         NEW_PAGE_FILE_NAME
     };
     let title = unique_name_in(&parent, suggested);
-    let name_path = Path::new(&title);
-    if title.is_empty()
-        || title.starts_with('.')
-        || name_path.components().count() != 1
-        || !matches!(
-            name_path.components().next(),
-            Some(std::path::Component::Normal(_))
-        )
-    {
-        return Err("文件名不能为空、不能以点开头，也不能包含路径分隔符".into());
-    }
+    validate_entry_name(&title, kind == "folder")?;
     let destination = parent.join(&title);
     if destination.exists() {
         return Err(format!("同名文件已存在：{title}"));
@@ -645,6 +737,41 @@ fn write_atomic_if_changed(path: &Path, payload: &str) -> Result<(), String> {
         return Ok(());
     }
     write_atomic(path, payload)
+}
+
+fn normalized_markdown(text: &str) -> String {
+    strip_generated_front_matter(text)
+        .replace("\r\n", "\n")
+        .trim_end()
+        .to_string()
+}
+
+fn markdown_content_hash(text: &str) -> String {
+    format!("{:x}", Sha256::digest(normalized_markdown(text).as_bytes()))
+}
+
+fn last_written_markdown_hash(node: &Value) -> Option<&str> {
+    node.get("contentHash")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+/// True when HyperSpace is trying to write the same markdown it last saved,
+/// but the file on disk has since been changed by another editor.
+fn is_stale_markdown_write(last_hash: Option<&str>, incoming: &str, on_disk: &str) -> bool {
+    let Some(last_hash) = last_hash else {
+        return false;
+    };
+    markdown_content_hash(incoming) == last_hash && markdown_content_hash(on_disk) != last_hash
+}
+
+fn record_written_markdown_hash(sidecar: &mut Value, payload: &str) {
+    if let Some(object) = sidecar.as_object_mut() {
+        object.insert(
+            "contentHash".into(),
+            Value::String(markdown_content_hash(payload)),
+        );
+    }
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
@@ -892,17 +1019,21 @@ pub fn save_project_workspace(project_path: &Path, payload: &str) -> Result<(), 
             valid_page_ids.insert(id.clone());
             fs::create_dir_all(&notes_dir).map_err(|error| error.to_string())?;
             let notes_path = notes_dir.join(format!("{id}.md"));
+            let existing = fs::read_to_string(&notes_path).unwrap_or_default();
             let mut body = note_body(&workspace, &id);
             if body.trim().is_empty() {
-                let existing = fs::read_to_string(&notes_path)
-                    .ok()
-                    .map(|text| strip_generated_front_matter(&text))
-                    .unwrap_or_default();
-                if !existing.trim().is_empty() {
-                    body = existing;
+                let stripped = strip_generated_front_matter(&existing);
+                if !stripped.trim().is_empty() {
+                    body = stripped;
                 }
             }
-            write_atomic_if_changed(&notes_path, &markdown_file(&id, &title, &body))?;
+            let payload = markdown_file(&id, &title, &body);
+            if is_stale_markdown_write(last_written_markdown_hash(node), &payload, &existing) {
+                body = strip_generated_front_matter(&existing);
+            } else {
+                write_atomic_if_changed(&notes_path, &payload)?;
+                record_written_markdown_hash(&mut node_sidecar, &payload);
+            }
             let document = json!({
               "formatVersion": 1,
               "markdown": body,
@@ -932,8 +1063,13 @@ pub fn save_project_workspace(project_path: &Path, payload: &str) -> Result<(), 
                 } else {
                     body.clone()
                 };
-                write_atomic_if_changed(&source_path, &payload)?;
-                body
+                if is_stale_markdown_write(last_written_markdown_hash(node), &payload, &on_disk) {
+                    strip_generated_front_matter(&on_disk)
+                } else {
+                    write_atomic_if_changed(&source_path, &payload)?;
+                    record_written_markdown_hash(&mut node_sidecar, &payload);
+                    body
+                }
             }
         } else {
             String::new()
@@ -1347,10 +1483,12 @@ mod tests {
         fs::create_dir_all(project.join("node_modules/pkg")).expect("create ignored tree");
         fs::create_dir_all(project.join(".git")).expect("create git directory");
         fs::create_dir_all(project.join(".idea")).expect("create hidden directory");
+        fs::create_dir_all(project.join(".assets")).expect("create assets directory");
         fs::write(project.join("README.md"), "hello").expect("write readme");
         fs::write(project.join(".env"), "SECRET=hidden").expect("write hidden file");
         fs::write(project.join(".idea/workspace.xml"), "hidden")
             .expect("write file in hidden directory");
+        fs::write(project.join(".assets/cover.png"), "image").expect("write assets file");
         fs::write(project.join("src/main.ts"), "export {};").expect("write source");
         fs::write(project.join("src/components/App.tsx"), "export default 1;")
             .expect("write component");
@@ -1371,9 +1509,26 @@ mod tests {
         assert!(paths.contains("src"));
         assert!(paths.contains("src/main.ts"));
         assert!(paths.contains("src/components/App.tsx"));
+        assert!(paths.contains(".assets"));
+        assert!(paths.contains(".assets/cover.png"));
         assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
         assert!(!paths.iter().any(|path| path.starts_with(".git")));
-        assert!(!paths.iter().any(|path| path.starts_with('.')));
+        assert!(!paths.contains(".env"));
+        assert!(!paths.iter().any(|path| path.starts_with(".idea")));
+        assert!(!paths.iter().any(|path| {
+            path.split('/').any(|segment| {
+                segment.starts_with('.') && segment != ASSETS_DIRECTORY_NAME
+            })
+        }));
+        assert!(!is_ignored_fs_event(
+            &project,
+            &project.join(".assets/cover.png")
+        ));
+        assert!(is_ignored_fs_event(&project, &project.join(".env")));
+        assert!(is_ignored_fs_event(
+            &project,
+            &project.join(".idea/workspace.xml")
+        ));
 
         let src_id = filesystem_node_id("src");
         let main = nodes
@@ -1517,6 +1672,50 @@ mod tests {
     }
 
     #[test]
+    fn save_does_not_overwrite_external_markdown_with_stale_buffer() {
+        let project = test_directory("stale-markdown");
+        fs::create_dir_all(&project).expect("create temp project");
+        fs::write(project.join("note.md"), "from hyperspace\n").expect("write markdown");
+
+        let opened = open_project_workspace(&project)
+            .expect("open project")
+            .expect("workspace");
+        save_project_workspace(&project, &opened).expect("establish written hash");
+
+        let hashed = load_project_workspace(&project)
+            .expect("load hashed workspace")
+            .expect("workspace exists");
+        fs::write(project.join("note.md"), "from typora\n").expect("external edit");
+        save_project_workspace(&project, &hashed).expect("stale autosave");
+
+        assert_eq!(
+            fs::read_to_string(project.join("note.md")).expect("read after stale save"),
+            "from typora\n",
+            "stale HyperSpace buffer must not replace an external editor write"
+        );
+
+        let mut edited: Value = serde_json::from_str(&hashed).expect("valid hashed JSON");
+        let note_id = edited["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["localPath"] == "note.md")
+            .expect("note node")["id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+        edited["noteMarkdown"][&note_id] = Value::String("from hyperspace again".into());
+        save_project_workspace(&project, &edited.to_string()).expect("user edit save");
+        assert_eq!(
+            fs::read_to_string(project.join("note.md")).expect("read user edit"),
+            "from hyperspace again\n",
+            "an actual HyperSpace edit still writes after the hash is established"
+        );
+
+        fs::remove_dir_all(project).expect("remove temp project");
+    }
+
+    #[test]
     fn external_rename_keeps_filesystem_node_metadata() {
         let project = test_directory("external-rename");
         fs::create_dir_all(&project).expect("create temp project");
@@ -1565,8 +1764,41 @@ mod tests {
         assert!(!project.join("docs/old.md").exists());
         assert!(project.join("docs/new.md").exists());
 
-        delete_project_entries(&project, &["docs".into()]).expect("delete directory");
+        let assets = rename_project_entry(&project, "docs", ".assets").expect("rename assets folder");
+        assert_eq!(assets, ".assets");
+        assert!(project.join(".assets/new.md").is_file());
+        assert!(
+            rename_project_entry(&project, ".assets/new.md", ".hidden.md").is_err(),
+            "hidden files should still be rejected"
+        );
+
+        delete_project_entries(&project, &[".assets".into()]).expect("delete directory");
         assert!(!project.join("docs").exists());
+        fs::remove_dir_all(project).expect("remove temp project");
+    }
+
+    #[test]
+    fn move_project_entry_relocates_files_and_rejects_nested_moves() {
+        let project = test_directory("entry-move");
+        fs::create_dir_all(project.join("docs/nested")).expect("create directories");
+        fs::create_dir_all(project.join("assets")).expect("create destination");
+        fs::write(project.join("docs/old.md"), "body").expect("write file");
+        fs::write(project.join("assets/old.md"), "taken").expect("write colliding file");
+
+        let moved = move_project_entry(&project, "docs/old.md", "assets").expect("move file");
+        assert_eq!(moved, "assets/old (2).md");
+        assert!(!project.join("docs/old.md").exists());
+        assert_eq!(
+            fs::read_to_string(project.join("assets/old (2).md")).expect("read moved file"),
+            "body"
+        );
+
+        let same_dir = move_project_entry(&project, "assets/old.md", "assets").expect("same folder");
+        assert_eq!(same_dir, "assets/old.md");
+
+        let error = move_project_entry(&project, "docs", "docs/nested").expect_err("nested move");
+        assert!(error.contains("自身内部"));
+
         fs::remove_dir_all(project).expect("remove temp project");
     }
 
