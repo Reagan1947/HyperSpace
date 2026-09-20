@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { WorkspaceState } from "./types";
+import { initialWorkspace } from "./data";
+import type { ContentNode, NoteBlock, WorkspaceState } from "./types";
+
+type LegacyWorkspaceState = WorkspaceState & {
+  editorDocuments?: Record<string, unknown[]>;
+};
 
 export interface GitChange {
   status: string;
@@ -43,6 +48,16 @@ export interface ImportedFile {
   lfsTracked: boolean;
 }
 
+export interface CreatedWorkspaceEntry {
+  id: string;
+  title: string;
+  kind: "file" | "folder";
+  relativePath: string;
+  fileType?: string | null;
+  size?: string | null;
+  fileIdentity?: string | null;
+}
+
 const STORAGE_KEY = "hyperspace.workspace.v1";
 const LEGACY_WORKSPACE_FOLDER_ID = "folder-work";
 
@@ -50,12 +65,56 @@ function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
 
-function migrateWorkspace(workspace: WorkspaceState): WorkspaceState {
+function legacyBlocksToMarkdown(blocks: NoteBlock[]) {
+  return blocks.map((block) => {
+    const content = block.content ?? "";
+    switch (block.kind) {
+      case "heading1": return `# ${content}`;
+      case "heading": return `## ${content}`;
+      case "heading3": return `### ${content}`;
+      case "bullet": return `- ${content}`;
+      case "ordered": return `1. ${content}`;
+      case "quote":
+      case "callout": return `> ${content}`;
+      case "code": return `\`\`\`${block.language ?? "text"}\n${content}\n\`\`\``;
+      case "folder":
+      case "file": return `\`\`\`hyperspace\n${JSON.stringify({
+        version: 1,
+        kind: block.kind,
+        targetNodeId: block.targetNodeId ?? "missing",
+        blockId: block.id,
+      })}\n\`\`\``;
+      default: return content;
+    }
+  }).join("\n\n");
+}
+
+function fallbackMarkdownForNode(node: ContentNode) {
+  const byId = initialWorkspace.noteMarkdown[node.id];
+  if (byId?.trim()) return byId;
+  const stem = node.localPath?.split(/[/\\]/).pop()?.replace(/\.(md|markdown)$/i, "");
+  if (stem && initialWorkspace.noteMarkdown[stem]?.trim()) return initialWorkspace.noteMarkdown[stem];
+  const match = initialWorkspace.nodes.find((item) => item.title === node.title || item.title === stem);
+  if (match && initialWorkspace.noteMarkdown[match.id]?.trim()) return initialWorkspace.noteMarkdown[match.id];
+  return "";
+}
+
+function migrateWorkspace(workspace: LegacyWorkspaceState): WorkspaceState {
+  const noteMarkdown = { ...(workspace.noteMarkdown ?? {}) };
+  for (const node of workspace.nodes) {
+    const isMarkdown = node.kind === "page" || (node.kind === "file" && ["md", "markdown"].includes(node.fileType?.toLowerCase() ?? ""));
+    if (!isMarkdown) continue;
+    const existing = noteMarkdown[node.id];
+    if (typeof existing === "string" && existing.trim()) continue;
+    const migrated = legacyBlocksToMarkdown(workspace.blocks?.[node.id] ?? []);
+    noteMarkdown[node.id] = migrated || fallbackMarkdownForNode(node) || existing || "";
+  }
+  const { blocks: _blocks, editorDocuments: _editorDocuments, ...current } = workspace;
   const legacyWorkspaceFolder = workspace.nodes.find((node) =>
     node.id === LEGACY_WORKSPACE_FOLDER_ID && node.parentId === null && node.kind === "folder"
   );
 
-  if (!legacyWorkspaceFolder) return workspace;
+  if (!legacyWorkspaceFolder) return { ...current, noteMarkdown };
 
   const nodes = workspace.nodes
     .filter((node) => node.id !== LEGACY_WORKSPACE_FOLDER_ID)
@@ -63,7 +122,8 @@ function migrateWorkspace(workspace: WorkspaceState): WorkspaceState {
   const firstPromotedNode = nodes.find((node) => node.parentId === null);
 
   return {
-    ...workspace,
+    ...current,
+    noteMarkdown,
     nodes,
     selectedNodeId: workspace.selectedNodeId === LEGACY_WORKSPACE_FOLDER_ID
       ? firstPromotedNode?.id ?? ""
@@ -75,10 +135,10 @@ export async function loadWorkspace(): Promise<WorkspaceState | null> {
   try {
     if (isTauri()) {
       const raw = await invoke<string | null>("load_workspace");
-      return raw ? migrateWorkspace(JSON.parse(raw) as WorkspaceState) : null;
+      return raw ? migrateWorkspace(JSON.parse(raw) as LegacyWorkspaceState) : null;
     }
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? migrateWorkspace(JSON.parse(raw) as WorkspaceState) : null;
+    return raw ? migrateWorkspace(JSON.parse(raw) as LegacyWorkspaceState) : null;
   } catch (error) {
     console.warn("Failed to load workspace", error);
     return null;
@@ -111,7 +171,7 @@ export async function getCurrentProject(): Promise<string | null> {
 export async function openProject(path: string): Promise<WorkspaceState | null> {
   if (!isTauri()) return null;
   const raw = await invoke<string | null>("open_project", { path });
-  return raw ? migrateWorkspace(JSON.parse(raw) as WorkspaceState) : null;
+  return raw ? migrateWorkspace(JSON.parse(raw) as LegacyWorkspaceState) : null;
 }
 
 export function projectNameFromPath(path: string | null | undefined): string {
@@ -162,4 +222,22 @@ export async function searchWorkspace(query: string, limit = 20): Promise<Worksp
 export async function importPdf(sourcePath: string): Promise<ImportedFile> {
   if (!isTauri()) throw new Error("PDF 导入仅在桌面应用中可用");
   return invoke<ImportedFile>("import_pdf", { sourcePath });
+}
+
+export async function createWorkspaceEntry(
+  parentPath: string,
+  kind: "file" | "folder",
+): Promise<CreatedWorkspaceEntry> {
+  if (!isTauri()) throw new Error("新建文件仅在桌面应用中可用");
+  return invoke<CreatedWorkspaceEntry>("create_workspace_entry", { parentPath, kind });
+}
+
+export async function renameWorkspaceEntry(localPath: string, newName: string): Promise<string> {
+  if (!isTauri()) throw new Error("文件重命名仅在桌面应用中可用");
+  return invoke<string>("rename_workspace_entry", { localPath, newName });
+}
+
+export async function deleteWorkspaceEntries(localPaths: string[]): Promise<void> {
+  if (!isTauri()) throw new Error("文件删除仅在桌面应用中可用");
+  await invoke("delete_workspace_entries", { localPaths });
 }

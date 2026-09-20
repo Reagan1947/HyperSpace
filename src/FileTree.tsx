@@ -140,15 +140,25 @@ function toTree(nodes: ContentNode[]): FileTreeNode[] {
   return (childrenByParent.get(null) ?? []).map(build);
 }
 
+function isMarkdownNode(node: ContentNode) {
+  if (node.kind === "page") return true;
+  const fileType = node.fileType?.toUpperCase();
+  return node.kind === "file" && (fileType === "MD" || fileType === "MARKDOWN");
+}
+
 function filterTreeNodes(nodes: ContentNode[], filter: FileTreeProps["filter"], tagFilterIds: string[]): ContentNode[] {
   if (!filter && tagFilterIds.length === 0) return nodes;
 
-  const targetKind: NodeKind | null = filter === "notes" ? "page" : filter === "files" ? "file" : null;
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const visibleIds = new Set<string>();
 
   for (const node of nodes) {
-    if (targetKind && node.kind !== targetKind) continue;
+    const matchesFilter = filter === "notes"
+      ? isMarkdownNode(node)
+      : filter === "files"
+        ? node.kind === "file" && !isMarkdownNode(node)
+        : true;
+    if (!matchesFilter) continue;
     if (tagFilterIds.length > 0 && !tagFilterIds.some((tagId) => node.tagIds?.includes(tagId))) continue;
     let current: ContentNode | undefined = node;
     while (current && !visibleIds.has(current.id)) {
@@ -183,7 +193,7 @@ function TreeAssetIcon({ src }: { src: string }) {
 
 function FileNodeIcon({ node }: { node: ContentNode }) {
   if (node.kind === "folder") return <TreeAssetIcon src={folderIcon} />;
-  if (node.kind === "page") return <TreeAssetIcon src={noteIcon} />;
+  if (isMarkdownNode(node)) return <TreeAssetIcon src={noteIcon} />;
   if (node.fileType === "XLSX") return <FileSpreadsheet size={16} strokeWidth={1.8} />;
   return <FileText size={16} strokeWidth={1.8} />;
 }

@@ -1,5 +1,6 @@
 node_modules
 dist
+public/vendor/vditor
 .DS_Store
 src-tauri/target
 *.log

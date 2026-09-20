@@ -70,7 +70,7 @@ fn write_current_project(app: &AppHandle, project_path: &Path) -> Result<(), Str
 #[tauri::command]
 fn load_workspace(app: AppHandle) -> Result<Option<String>, String> {
     if let Some(project_path) = read_current_project(&app)? {
-        return workspace_store::load_project_workspace(&project_path);
+        return workspace_store::open_project_workspace(&project_path);
     }
     let path = app_data_dir(&app)?.join(WORKSPACE_FILE);
     if !path.exists() {
@@ -201,6 +201,29 @@ fn import_pdf(app: AppHandle, source_path: String) -> Result<git_service::Import
     let project_path = require_current_project(&app)?;
     let toolchain = project_settings::resolve_git_toolchain(&app, &project_path)?;
     git_service::import_pdf(&toolchain, &project_path, Path::new(&source_path))
+}
+
+#[tauri::command]
+fn create_workspace_entry(
+    app: AppHandle,
+    parent_path: String,
+    kind: String,
+) -> Result<workspace_store::CreatedWorkspaceEntry, String> {
+    workspace_store::create_project_entry(&require_current_project(&app)?, &parent_path, &kind)
+}
+
+#[tauri::command]
+fn rename_workspace_entry(
+    app: AppHandle,
+    local_path: String,
+    new_name: String,
+) -> Result<String, String> {
+    workspace_store::rename_project_entry(&require_current_project(&app)?, &local_path, &new_name)
+}
+
+#[tauri::command]
+fn delete_workspace_entries(app: AppHandle, local_paths: Vec<String>) -> Result<(), String> {
+    workspace_store::delete_project_entries(&require_current_project(&app)?, &local_paths)
 }
 
 #[tauri::command]
@@ -412,6 +435,9 @@ pub fn run() {
             git_commit_all,
             search_workspace,
             import_pdf,
+            create_workspace_entry,
+            rename_workspace_entry,
+            delete_workspace_entries,
             get_project_settings,
             save_project_settings,
             import_ssh_key,

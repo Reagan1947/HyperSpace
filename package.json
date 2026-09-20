@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/sync-vditor-assets.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/sync-vditor-assets.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -12,23 +14,15 @@
     "desktop:build": "tauri build"
   },
   "dependencies": {
-    "@blocknote/code-block": "^0.54.0",
-    "@blocknote/core": "^0.54.0",
-    "@blocknote/mantine": "^0.54.0",
-    "@blocknote/math-block": "^0.54.0",
-    "@blocknote/react": "^0.54.0",
-    "@mantine/core": "^9.5.1",
-    "@mantine/hooks": "^9.5.1",
-    "@mantine/utils": "^6.0.22",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "highlight.js": "^11.12.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-arborist": "^3.16.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "vditor": "4.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.0",

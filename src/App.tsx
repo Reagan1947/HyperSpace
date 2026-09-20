@@ -1,15 +1,4 @@
-import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import plaintext from "highlight.js/lib/languages/plaintext";
-import python from "highlight.js/lib/languages/python";
-import sql from "highlight.js/lib/languages/sql";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import "highlight.js/styles/github.css";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import folderMenuIcon from "./assets/icons/folder-menu.svg";
 import projectIcon from "./assets/icons/project.svg";
 import structureOverviewIcon from "./assets/icons/structure-overview.svg";
@@ -20,71 +9,60 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  CircleHelp,
-  Clock3,
   Cloud,
-  Code2,
   File,
   Files,
   FileSpreadsheet,
   FileText,
   FileUp,
   Folder,
-  FolderOpen,
   FoldVertical,
   GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
-  Heading1,
-  Heading2,
-  Heading3,
-  List,
-  ListOrdered,
   ListTodo,
   ListTree,
   LocateFixed,
   Lock,
   LockOpen,
-  MessageSquareText,
   Minus,
   MoreHorizontal,
   MoreVertical,
-  Paperclip,
   Plus,
-  Quote,
   RefreshCw,
   Search,
   Server,
-  SlidersHorizontal,
   Sparkles,
-  Star,
   Tag,
   TerminalSquare,
-  Text,
   UnfoldVertical,
-  Users,
   X,
 } from "lucide-react";
 import { createBlankWorkspace, initialWorkspace } from "./data";
 import { FileTree } from "./FileTree";
 import type { FileTreeHandle } from "./FileTree";
+import { headingPath, headingSiblings, parseMarkdownHeadings, type MarkdownHeading } from "./markdownNavigation";
 import { TerminalPanel } from "./TerminalPanel";
+import { HyperSpaceVditor } from "./VditorEditor";
 import { PROJECT_CREATED_EVENT, type ProjectCreatedPayload } from "./NewProjectDialog";
 import {
   commitAll,
+  createWorkspaceEntry,
+  deleteWorkspaceEntries,
   getCurrentProject,
   getGitRepositoryInfo,
   importPdf,
   loadWorkspace,
   openProject,
   projectNameFromPath,
+  renameWorkspaceEntry,
   saveWorkspace,
   searchWorkspace,
   type GitRepositoryInfo,
   type WorkspaceSearchResult,
 } from "./storage";
-import type { ContentNode, MarkerColor, NoteBlock, TagDefinition, WorkspaceState } from "./types";
+import type { ContentNode, MarkerColor, TagDefinition, WorkspaceState } from "./types";
 
 type SyncStatus = "loading" | "saved" | "saving" | "offline";
 type PrimaryLeftTool = "project" | "commit" | "pullRequests";
@@ -92,18 +70,6 @@ type SecondaryLeftTool = "structure" | "bookmarks";
 type BottomTool = "search";
 type SecondaryBottomTool = "git" | "terminal" | "todo" | "services";
 type RightTool = "notifications" | "references" | "ai";
-
-const HyperSpaceBlockEditor = lazy(() => import("./BlockEditor").then((module) => ({ default: module.HyperSpaceBlockEditor })));
-
-hljs.registerLanguage("plaintext", plaintext);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("sql", sql);
 
 const cloneInitial = () => structuredClone(initialWorkspace);
 
@@ -125,89 +91,39 @@ function formatFileSize(bytes: number) {
 
 function NodeIcon({ node, size = 16 }: { node: ContentNode; size?: number }) {
   if (node.kind === "folder") return <Folder size={size} strokeWidth={1.8} />;
+  if (isMarkdownDocument(node)) return <File size={size} strokeWidth={1.8} />;
   if (node.fileType === "XLSX") return <FileSpreadsheet size={size} strokeWidth={1.8} />;
   if (node.kind === "file") return <FileText size={size} strokeWidth={1.8} />;
   return <File size={size} strokeWidth={1.8} />;
 }
 
-type BlockCommand = {
-  id: string;
-  label: string;
-  description: string;
-  kind: NoteBlock["kind"];
-  targetNodeId?: string;
-  language?: string;
-  icon: React.ReactNode;
-  keywords: string;
-};
+function isMarkdownDocument(node: ContentNode) {
+  if (node.kind === "page") return true;
+  const fileType = node.fileType?.toLowerCase();
+  return node.kind === "file" && (fileType === "md" || fileType === "markdown");
+}
 
-function getBlockCommands(nodes: ContentNode[]): BlockCommand[] {
-  const commands: BlockCommand[] = [
-    { id: "text", label: "正文", description: "普通文本段落", kind: "text", icon: <Text size={16} />, keywords: "text paragraph zhengwen wenben" },
-    { id: "heading1", label: "一级标题", description: "输入 # 后按空格", kind: "heading1", icon: <Heading1 size={16} />, keywords: "heading 1 h1 title biaoti" },
-    { id: "heading", label: "二级标题", description: "输入 ## 后按空格", kind: "heading", icon: <Heading2 size={16} />, keywords: "heading 2 h2 title biaoti" },
-    { id: "heading3", label: "三级标题", description: "输入 ### 后按空格", kind: "heading3", icon: <Heading3 size={16} />, keywords: "heading 3 h3 title biaoti" },
-    { id: "bullet", label: "无序列表", description: "输入 - 或 * 后按空格", kind: "bullet", icon: <List size={16} />, keywords: "bullet list unordered liebiao" },
-    { id: "ordered", label: "有序列表", description: "输入 1. 后按空格", kind: "ordered", icon: <ListOrdered size={16} />, keywords: "ordered numbered list liebiao" },
-    { id: "quote", label: "引用", description: "输入 > 后按空格", kind: "quote", icon: <Quote size={16} />, keywords: "quote blockquote yinyong" },
-    { id: "code", label: "代码块", description: "输入 ```语言 后按 Enter", kind: "code", language: "plaintext", icon: <Code2 size={16} />, keywords: "code block daima python javascript typescript" },
-    { id: "callout", label: "提示块", description: "突出显示重要信息", kind: "callout", icon: <MessageSquareText size={16} />, keywords: "callout tip tishi" },
-  ];
+function parentDirectoryPath(parent: ContentNode | undefined) {
+  if (!parent) return "";
+  if (parent.kind === "folder") return parent.localPath ?? "";
+  if (!parent.localPath) return "";
+  const parts = parent.localPath.split("/");
+  parts.pop();
+  return parts.join("/");
+}
 
-  for (const node of nodes) {
-    if (node.kind === "folder") {
-      commands.push({ id: `folder-${node.id}`, label: `嵌入文件夹：${node.title}`, description: "在笔记中显示文件夹内容", kind: "folder", targetNodeId: node.id, icon: <FolderOpen size={16} />, keywords: `folder wenjianjia ${node.title}` });
-    } else if (node.kind === "file") {
-      commands.push({ id: `file-${node.id}`, label: `嵌入文件：${node.title}`, description: "在笔记中添加文件卡片", kind: "file", targetNodeId: node.id, icon: <Paperclip size={16} />, keywords: `file attachment wenjian ${node.title}` });
-    }
+function uniqueSiblingName(nodes: ContentNode[], parentId: string | null, fileName: string) {
+  const used = new Set(nodes.filter((node) => node.parentId === parentId).map((node) => node.title));
+  if (!used.has(fileName)) return fileName;
+  const lastDot = fileName.lastIndexOf(".");
+  const hasExtension = lastDot > 0;
+  const stem = hasExtension ? fileName.slice(0, lastDot) : fileName;
+  const extension = hasExtension ? fileName.slice(lastDot) : "";
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${stem} (${suffix})${extension}`;
+    if (!used.has(candidate)) return candidate;
   }
-
-  return commands;
-}
-
-const markdownShortcuts: Record<string, NoteBlock["kind"]> = {
-  "# ": "heading1",
-  "## ": "heading",
-  "### ": "heading3",
-  "- ": "bullet",
-  "* ": "bullet",
-  "1. ": "ordered",
-  "> ": "quote",
-  "``` ": "code",
-};
-
-function splitEditableContent(editable: HTMLElement): [string, string] {
-  const content = editable.textContent ?? "";
-  const selection = window.getSelection();
-  if (!selection?.rangeCount) return [content, ""];
-  const selectedRange = selection.getRangeAt(0);
-  if (!editable.contains(selectedRange.startContainer) || !editable.contains(selectedRange.endContainer)) return [content, ""];
-
-  const leadingRange = document.createRange();
-  leadingRange.selectNodeContents(editable);
-  leadingRange.setEnd(selectedRange.startContainer, selectedRange.startOffset);
-  const start = leadingRange.toString().length;
-  const end = start + selectedRange.toString().length;
-  return [content.slice(0, start), content.slice(end)];
-}
-
-function focusEditorBlock(blockId: string, position: "start" | "end" = "start") {
-  window.requestAnimationFrame(() => {
-    const editable = document.querySelector<HTMLElement>(`[data-editor-block-id="${blockId}"]`);
-    if (!editable) return;
-    editable.focus();
-    if (editable instanceof HTMLTextAreaElement) {
-      const offset = position === "start" ? 0 : editable.value.length;
-      editable.setSelectionRange(offset, offset);
-      return;
-    }
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(editable);
-    range.collapse(position === "start");
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  });
+  return `${stem}-new${extension}`;
 }
 
 function ProjectSidebar({
@@ -393,14 +309,15 @@ function ProjectSidebar({
   );
 }
 
-function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRefreshGit, onSelectNode, onClose }: {
+function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRefreshGit, onSelectNode, onSelectHeading, onClose }: {
   tool: Exclude<PrimaryLeftTool, "project"> | SecondaryLeftTool;
-  outlineItems: { id: string; content: string }[];
+  outlineItems: { id: string; content: string; level: number }[];
   bookmarks: ContentNode[];
   gitInfo?: GitRepositoryInfo;
   gitLoading?: boolean;
   onRefreshGit?: () => void;
   onSelectNode: (id: string) => void;
+  onSelectHeading?: (id: string) => void;
   onClose: () => void;
 }) {
   const config = tool === "commit"
@@ -443,8 +360,18 @@ function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRef
           )}
         </div>
       ) : hasStructure ? (
-        <div className="sidebar-tool-list">
-          {outlineItems.map((item) => <button key={item.id}><Hash size={14} /><span>{item.content}</span></button>)}
+        <div className="sidebar-tool-list outline-list">
+          {outlineItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              style={{ paddingLeft: 8 + (item.level - 1) * 12 }}
+              onClick={() => onSelectHeading?.(item.id)}
+            >
+              <Hash size={14} />
+              <span>{item.content}</span>
+            </button>
+          ))}
         </div>
       ) : hasBookmarks ? (
         <div className="sidebar-tool-list">
@@ -516,392 +443,37 @@ function RightActivityRail({
   );
 }
 
-function EmbeddedNode({ target, children }: { target?: ContentNode; children?: ContentNode[] }) {
-  if (!target) return null;
-
-  if (target.kind === "folder") {
-    return (
-      <section className="embedded-folder">
-        <div className="embedded-heading">
-          <span className="folder-badge"><FolderOpen size={17} /></span>
-          <div><strong>{target.title}</strong><span>{children?.length ?? 0} 个项目</span></div>
-          <button><MoreHorizontal size={17} /></button>
-        </div>
-        <div className="file-list">
-          {children?.map((child) => (
-            <button className="file-row" key={child.id}>
-              <span className={`file-type ${child.fileType?.toLowerCase() ?? "note"}`}><NodeIcon node={child} size={17} /></span>
-              <span className="file-main"><strong>{child.title}</strong><small>{child.fileType ?? "笔记"} · {child.size ?? child.updatedAt}</small></span>
-              <span className="file-time">{child.updatedAt}</span>
-              <MoreHorizontal size={16} />
-            </button>
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <button className="embedded-file">
-      <span className="pdf-mark">PDF</span>
-      <span><strong>{target.title}</strong><small>{target.size} · {target.updatedAt}更新</small></span>
-      <span className="open-label">在桌面打开</span>
-      <MoreHorizontal size={17} />
-    </button>
-  );
-}
-
-const codeLanguages = [
-  ["plaintext", "纯文本"],
-  ["python", "Python"],
-  ["javascript", "JavaScript"],
-  ["typescript", "TypeScript"],
-  ["json", "JSON"],
-  ["bash", "Shell"],
-  ["xml", "HTML / XML"],
-  ["css", "CSS"],
-  ["sql", "SQL"],
-] as const;
-
-const languageAliases: Record<string, string> = {
-  js: "javascript",
-  jsx: "javascript",
-  ts: "typescript",
-  tsx: "typescript",
-  py: "python",
-  sh: "bash",
-  shell: "bash",
-  html: "xml",
-};
-
-function normalizeCodeLanguage(language?: string) {
-  const normalized = (language || "plaintext").trim().toLowerCase();
-  const resolved = languageAliases[normalized] ?? normalized;
-  return hljs.getLanguage(resolved) ? resolved : "plaintext";
-}
-
-function CodeBlockEditor({ block, onChange, onLanguageChange }: {
-  block: NoteBlock;
-  onChange: (id: string, content: string) => void;
-  onLanguageChange: (id: string, language: string) => void;
-}) {
-  const [draft, setDraft] = useState(block.content ?? "");
-  const highlightRef = useRef<HTMLPreElement>(null);
-  const language = normalizeCodeLanguage(block.language);
-  const highlighted = useMemo(
-    () => hljs.highlight(draft, { language, ignoreIllegals: true }).value,
-    [draft, language],
-  );
-
-  useEffect(() => setDraft(block.content ?? ""), [block.content]);
-
-  return (
-    <div className="code-block-editor">
-      <div className="code-block-toolbar">
-        <Code2 size={14} />
-        <select
-          aria-label="代码高亮语言"
-          value={language}
-          onChange={(event) => onLanguageChange(block.id, event.currentTarget.value)}
-        >
-          {codeLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
-      </div>
-      <div className="code-editor-body">
-        <pre ref={highlightRef} aria-hidden="true"><code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
-        <textarea
-          data-editor-block-id={block.id}
-          aria-label={`${codeLanguages.find(([value]) => value === language)?.[1] ?? language} 代码`}
-          value={draft}
-          spellCheck={false}
-          onChange={(event) => setDraft(event.currentTarget.value)}
-          onBlur={() => onChange(block.id, draft)}
-          onScroll={(event) => {
-            if (!highlightRef.current) return;
-            highlightRef.current.scrollTop = event.currentTarget.scrollTop;
-            highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function EditableTextBlock({
-  block,
-  nodes,
-  onChange,
-  onCommand,
-  onSplit,
-  onDelete,
-  deleteFocusTarget,
-}: {
-  block: NoteBlock;
-  nodes: ContentNode[];
-  onChange: (id: string, content: string) => void;
-  onCommand: (id: string, command: BlockCommand, content: string, source: "plus" | "slash") => void;
-  onSplit: (id: string, nextId: string, content: string, nextContent: string, nextKind: NoteBlock["kind"]) => void;
-  onDelete: (id: string) => void;
-  deleteFocusTarget?: { id: string; position: "start" | "end" };
-}) {
-  const Tag = block.kind === "heading1"
-    ? "h1"
-    : block.kind === "heading"
-      ? "h2"
-      : block.kind === "heading3"
-        ? "h3"
-        : block.kind === "quote"
-          ? "blockquote"
-          : block.kind === "code"
-            ? "pre"
-            : "p";
-  const [menuSource, setMenuSource] = useState<"plus" | "slash" | null>(null);
-  const [query, setQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
-  const editableRef = useRef<HTMLHeadingElement & HTMLParagraphElement & HTMLQuoteElement & HTMLPreElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const commands = useMemo(() => getBlockCommands(nodes), [nodes]);
-  const filteredCommands = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return normalized
-      ? commands.filter((command) => `${command.label} ${command.keywords}`.toLowerCase().includes(normalized))
-      : commands;
-  }, [commands, query]);
-
-  useEffect(() => setActiveIndex(0), [query]);
-
-  useEffect(() => {
-    if (!menuSource) return;
-    const close = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as globalThis.Node) && event.target !== editableRef.current) setMenuSource(null);
-    };
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [menuSource]);
-
-  const restoreEditorFocus = () => {
-    window.requestAnimationFrame(() => {
-      const editable = editableRef.current;
-      if (!editable) {
-        focusEditorBlock(block.id, "end");
-        return;
-      }
-      editable.focus();
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editable);
-      range.collapse(false);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    });
-  };
-
-  const chooseCommand = (command: BlockCommand) => {
-    const rawContent = editableRef.current?.textContent ?? block.content ?? "";
-    const content = menuSource === "slash" ? rawContent.replace(/\/[\w\u4e00-\u9fff-]*$/, "").trimEnd() : rawContent;
-    const source = menuSource ?? "plus";
-    setMenuSource(null);
-    onCommand(block.id, command, content, source);
-    restoreEditorFocus();
-  };
-
-  return (
-    <div className={`editable-row ${block.kind}`}>
-      <button
-        className="block-handle"
-        aria-label="插入内容块"
-        aria-expanded={menuSource === "plus"}
-        onClick={() => {
-          setQuery("");
-          setMenuSource((current) => current === "plus" ? null : "plus");
-        }}
-      ><Plus size={13} /></button>
-      <Tag
-        ref={editableRef}
-        data-editor-block-id={block.id}
-        contentEditable
-        suppressContentEditableWarning
-        data-placeholder={block.kind === "heading1" ? "一级标题" : block.kind === "heading" ? "二级标题" : block.kind === "heading3" ? "三级标题" : block.kind === "code" ? "输入代码" : "输入文字，或按 / 插入内容"}
-        onBlur={(event) => onChange(block.id, event.currentTarget.textContent ?? "")}
-        onInput={(event) => {
-          const content = (event.currentTarget.textContent ?? "").replace(/\u00a0/g, " ");
-          const shortcutKind = markdownShortcuts[content];
-          if (shortcutKind) {
-            const shortcutCommand = commands.find((command) => command.kind === shortcutKind);
-            if (shortcutCommand) {
-              onCommand(block.id, shortcutCommand, "", "slash");
-              restoreEditorFocus();
-            }
-            return;
-          }
-          const match = content.match(/\/([\w\u4e00-\u9fff-]*)$/);
-          if (match) {
-            setQuery(match[1]);
-            setMenuSource("slash");
-          } else if (menuSource === "slash") {
-            setMenuSource(null);
-          }
-        }}
-        onKeyDown={(event) => {
-          const isHeading = block.kind === "heading1" || block.kind === "heading" || block.kind === "heading3";
-          if (event.key === "Backspace" && isHeading && !(event.currentTarget.textContent ?? "").length) {
-            const textCommand = commands.find((command) => command.kind === "text");
-            if (textCommand) {
-              event.preventDefault();
-              setMenuSource(null);
-              onCommand(block.id, textCommand, "", "slash");
-              restoreEditorFocus();
-            }
-            return;
-          }
-          if (event.key === "Backspace" && block.kind === "text" && !(event.currentTarget.textContent ?? "").length && deleteFocusTarget) {
-            event.preventDefault();
-            onDelete(block.id);
-            focusEditorBlock(deleteFocusTarget.id, deleteFocusTarget.position);
-            return;
-          }
-          const codeFence = (event.currentTarget.textContent ?? "").trim().match(/^```([a-zA-Z0-9_+-]+)$/);
-          if (event.key === "Enter" && !event.shiftKey && !menuSource && !event.nativeEvent.isComposing && codeFence) {
-            event.preventDefault();
-            const codeCommand = commands.find((command) => command.kind === "code");
-            if (codeCommand) {
-              const requestedLanguage = normalizeCodeLanguage(codeFence[1]);
-              onCommand(block.id, { ...codeCommand, language: requestedLanguage }, "", "slash");
-              focusEditorBlock(block.id);
-            }
-            return;
-          }
-          if (event.key === "Enter" && !event.shiftKey && !menuSource && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            const [content, nextContent] = splitEditableContent(event.currentTarget);
-            const nextId = `block-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            const nextKind = block.kind === "bullet" || block.kind === "ordered" ? block.kind : "text";
-            onSplit(block.id, nextId, content, nextContent, nextKind);
-            focusEditorBlock(nextId);
-            return;
-          }
-          if (!menuSource) return;
-          if (event.key === "Escape") {
-            event.preventDefault();
-            setMenuSource(null);
-          } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && filteredCommands.length > 0) {
-            event.preventDefault();
-            const direction = event.key === "ArrowDown" ? 1 : -1;
-            setActiveIndex((current) => (current + direction + filteredCommands.length) % filteredCommands.length);
-          } else if (event.key === "Enter" && filteredCommands[activeIndex]) {
-            event.preventDefault();
-            chooseCommand(filteredCommands[activeIndex]);
-          }
-        }}
-      >
-        {block.content}
-      </Tag>
-      {menuSource && (
-        <div className="block-command-menu" ref={menuRef} role="listbox" aria-label="插入内容">
-          <div className="block-command-heading">基础块</div>
-          {filteredCommands.length > 0 ? filteredCommands.map((command, index) => (
-            <button
-              key={command.id}
-              className={index === activeIndex ? "active" : ""}
-              role="option"
-              aria-selected={index === activeIndex}
-              onMouseEnter={() => setActiveIndex(index)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => chooseCommand(command)}
-            >
-              <span>{command.icon}</span>
-              <span><strong>{command.label}</strong><small>{command.description}</small></span>
-            </button>
-          )) : <p className="block-command-empty">没有匹配的内容块</p>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function EditorBlock({ block, nodes, onChange, onLanguageChange, onCommand, onSplit, onDelete, deleteFocusTarget }: {
-  block: NoteBlock;
-  nodes: ContentNode[];
-  onChange: (id: string, content: string) => void;
-  onLanguageChange: (id: string, language: string) => void;
-  onCommand: (id: string, command: BlockCommand, content: string, source: "plus" | "slash") => void;
-  onSplit: (id: string, nextId: string, content: string, nextContent: string, nextKind: NoteBlock["kind"]) => void;
-  onDelete: (id: string) => void;
-  deleteFocusTarget?: { id: string; position: "start" | "end" };
-}) {
-  if (block.kind === "folder" || block.kind === "file") {
-    const target = nodes.find((node) => node.id === block.targetNodeId);
-    const children = nodes.filter((node) => node.parentId === target?.id);
-    return <EmbeddedNode target={target} children={children} />;
-  }
-
-  if (block.kind === "code") {
-    return <CodeBlockEditor block={block} onChange={onChange} onLanguageChange={onLanguageChange} />;
-  }
-
-  if (block.kind === "callout") {
-    return (
-      <div className="callout-block">
-        <Sparkles size={18} />
-        <div
-          contentEditable
-          suppressContentEditableWarning
-          data-editor-block-id={block.id}
-          onBlur={(event) => onChange(block.id, event.currentTarget.textContent ?? "")}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-            event.preventDefault();
-            const [content, nextContent] = splitEditableContent(event.currentTarget);
-            const nextId = `block-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            onSplit(block.id, nextId, content, nextContent, "text");
-            focusEditorBlock(nextId);
-          }}
-        >{block.content}</div>
-      </div>
-    );
-  }
-
-  return <EditableTextBlock block={block} nodes={nodes} onChange={onChange} onCommand={onCommand} onSplit={onSplit} onDelete={onDelete} deleteFocusTarget={deleteFocusTarget} />;
-}
-
 function NoteView({
   node,
   workspace,
   readOnly,
-  onTitleChange,
-  onDocumentChange,
-  onActiveBlockChange,
+  onMarkdownChange,
+  onNavigateNode,
+  onActiveHeadingChange,
+  onCursorChange,
 }: {
   node: ContentNode;
   workspace: WorkspaceState;
   readOnly: boolean;
-  onTitleChange: (title: string) => void;
-  onDocumentChange: (document: unknown[], markdown: string) => void;
-  onActiveBlockChange?: (blockId: string | null) => void;
+  onMarkdownChange: (markdown: string) => void;
+  onNavigateNode: (nodeId: string) => void;
+  onActiveHeadingChange?: (headingId: string | null) => void;
+  onCursorChange?: (position: { line: number; column: number }) => void;
 }) {
   return (
     <article className={`note-page ${readOnly ? "read-only" : ""}`}>
-      <div className="note-title-row">
-        <h1
-          contentEditable={!readOnly}
-          aria-readonly={readOnly}
-          suppressContentEditableWarning
-          onBlur={(event) => onTitleChange(event.currentTarget.textContent?.trim() || "未命名")}
-        >{node.title}</h1>
-      </div>
       <div className="editor">
-        <Suspense fallback={<div className="editor-loading">正在加载编辑器…</div>}>
-          <HyperSpaceBlockEditor
-            key={node.id}
-            pageId={node.id}
-            nodes={workspace.nodes}
-            initialDocument={workspace.editorDocuments?.[node.id]}
-            legacyBlocks={workspace.blocks[node.id] ?? []}
-            readOnly={readOnly}
-            onChange={onDocumentChange}
-            onActiveBlockChange={onActiveBlockChange}
-          />
-        </Suspense>
+        <HyperSpaceVditor
+          key={node.id}
+          pageId={node.id}
+          nodes={workspace.nodes}
+          value={workspace.noteMarkdown[node.id] ?? ""}
+          readOnly={readOnly}
+          onChange={onMarkdownChange}
+          onNavigateNode={onNavigateNode}
+          onActiveHeadingChange={onActiveHeadingChange}
+          onCursorChange={onCursorChange}
+        />
       </div>
     </article>
   );
@@ -921,126 +493,27 @@ function EmptyView({ node }: { node: ContentNode }) {
   );
 }
 
-function getBlockPlainText(content: unknown) {
-  if (Array.isArray(content)) {
-    return content.map((part) => part && typeof part === "object" && "text" in part ? String(part.text) : "").join("");
-  }
-  return typeof content === "string" ? content : "";
-}
-
-function getDocumentOutline(document: unknown[] | undefined) {
-  if (!document) return [];
-  const items: { id: string; content: string }[] = [];
-  const visit = (blocks: unknown[]) => {
-    for (const value of blocks) {
-      if (!value || typeof value !== "object") continue;
-      const block = value as { id?: unknown; type?: unknown; content?: unknown; children?: unknown };
-      if (block.type === "heading") {
-        const content = getBlockPlainText(block.content);
-        if (content) items.push({ id: typeof block.id === "string" ? block.id : `heading-${items.length}`, content });
-      }
-      if (Array.isArray(block.children)) visit(block.children);
-    }
-  };
-  visit(document);
-  return items;
-}
-
-function getCanvasPathForBlock(document: unknown[] | undefined, activeBlockId: string | null) {
-  if (!document || !activeBlockId) return [];
-
-  type HeadingCrumb = { id: string; content: string; level: number };
-  let headings: HeadingCrumb[] = [];
-  let result: { id: string; content: string }[] = [];
-  let found = false;
-
-  const visit = (blocks: unknown[]) => {
-    for (const value of blocks) {
-      if (found || !value || typeof value !== "object") continue;
-      const block = value as {
-        id?: unknown;
-        type?: unknown;
-        content?: unknown;
-        children?: unknown;
-        props?: { level?: unknown };
-      };
-      const blockId = typeof block.id === "string" ? block.id : null;
-
-      if (block.type === "heading") {
-        const level = typeof block.props?.level === "number" ? block.props.level : 1;
-        const content = getBlockPlainText(block.content);
-        headings = headings.filter((item) => item.level < level);
-        if (content) {
-          headings = [...headings, { id: blockId ?? `heading-${headings.length}`, content, level }];
-        }
-      }
-
-      if (blockId === activeBlockId) {
-        result = headings.map(({ id, content }) => ({ id, content }));
-        found = true;
-        return;
-      }
-
-      if (Array.isArray(block.children)) visit(block.children);
-    }
-  };
-
-  visit(document);
-  return result;
-}
-
-
-function getHeadingSiblings(document: unknown[] | undefined, headingId: string) {
-  if (!document) return [];
-
-  type HeadingItem = { id: string; content: string; level: number; parentId: string | null };
-  const headings: HeadingItem[] = [];
-  let stack: HeadingItem[] = [];
-
-  const visit = (blocks: unknown[]) => {
-    for (const value of blocks) {
-      if (!value || typeof value !== "object") continue;
-      const block = value as {
-        id?: unknown;
-        type?: unknown;
-        content?: unknown;
-        children?: unknown;
-        props?: { level?: unknown };
-      };
-      if (block.type === "heading") {
-        const level = typeof block.props?.level === "number" ? block.props.level : 1;
-        const content = getBlockPlainText(block.content);
-        const id = typeof block.id === "string" ? block.id : `heading-${headings.length}`;
-        stack = stack.filter((item) => item.level < level);
-        const item = { id, content, level, parentId: stack.at(-1)?.id ?? null };
-        if (content) headings.push(item);
-        stack = [...stack, item];
-      }
-      if (Array.isArray(block.children)) visit(block.children);
-    }
-  };
-
-  visit(document);
-  const target = headings.find((item) => item.id === headingId);
-  if (!target) return [];
-  return headings
-    .filter((item) => item.level === target.level && item.parentId === target.parentId)
-    .map(({ id, content }) => ({ id, content }));
-}
-
-function focusCanvasBlock(blockId: string) {
+function focusCanvasBlock(headingId: string) {
   const selectors = [
-    `.bn-block-outer[data-id="${blockId}"]`,
-    `[data-id="${blockId}"]`,
-    `#${CSS.escape(blockId)}`,
+    `[data-hs-heading-id="${CSS.escape(headingId)}"]`,
+    `#${CSS.escape(headingId)}`,
   ];
   for (const selector of selectors) {
-    const element = document.querySelector<HTMLElement>(selector);
+    const element = document.querySelector<HTMLElement>(`.hyperspace-vditor ${selector}`);
     if (element) {
       element.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
   }
+  const heading = parseMarkdownHeadings(
+    document.querySelector<HTMLElement>(".hyperspace-vditor .vditor-ir, .hyperspace-vditor .vditor-wysiwyg, .hyperspace-vditor textarea")?.innerText
+      ?? document.querySelector<HTMLTextAreaElement>(".hyperspace-vditor textarea")?.value
+      ?? "",
+  ).find((item) => item.id === headingId);
+  if (!heading) return;
+  const element = Array.from(document.querySelectorAll<HTMLElement>(".hyperspace-vditor h1, .hyperspace-vditor h2, .hyperspace-vditor h3, .hyperspace-vditor h4, .hyperspace-vditor h5, .hyperspace-vditor h6"))
+    .find((candidate) => (candidate.textContent ?? "").replace(/^H[1-6]/, "").replace(/^#{1,6}\s*/, "").trim() === heading.text);
+  element?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 
@@ -1267,7 +740,7 @@ function PathBreadcrumbs({
   nodes,
   projectName,
   canvasPath,
-  editorDocument,
+  headings,
   onSelectNode,
   onSelectHeading,
 }: {
@@ -1275,7 +748,7 @@ function PathBreadcrumbs({
   nodes: ContentNode[];
   projectName: string;
   canvasPath: { id: string; content: string }[];
-  editorDocument: unknown[] | undefined;
+  headings: MarkdownHeading[];
   onSelectNode: (id: string) => void;
   onSelectHeading: (id: string) => void;
 }) {
@@ -1313,16 +786,16 @@ function PathBreadcrumbs({
         key: `heading-${crumb.id}`,
         label: crumb.content,
         currentId: crumb.id,
-        siblings: getHeadingSiblings(editorDocument, crumb.id).map((item) => ({
+        siblings: headingSiblings(headings, crumb.id).map((item) => ({
           id: item.id,
-          label: item.content,
+          label: item.text,
           kind: "heading",
         })),
       });
     }
 
     return items;
-  }, [selected, nodes, projectName, canvasPath, editorDocument]);
+  }, [selected, nodes, projectName, canvasPath, headings]);
 
   useEffect(() => {
     if (!openKey) return;
@@ -1428,21 +901,39 @@ function App() {
   const hydrated = useRef(false);
 
   useEffect(() => {
-    void loadWorkspace().then((stored) => {
-      if (stored) {
-        setWorkspace(stored);
-        setTreeSelectedId(stored.selectedNodeId);
-        setOpenTabIds([stored.selectedNodeId]);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const path = await getCurrentProject().catch(() => null);
+        if (cancelled) return;
+        if (path) {
+          setProjectPath(path);
+          const opened = await openProject(path).catch(() => null);
+          if (cancelled) return;
+          if (opened) {
+            setWorkspace(opened);
+            setTreeSelectedId(opened.selectedNodeId);
+            setOpenTabIds([opened.selectedNodeId]);
+            return;
+          }
+        }
+        const stored = await loadWorkspace();
+        if (cancelled) return;
+        if (stored) {
+          setWorkspace(stored);
+          setTreeSelectedId(stored.selectedNodeId);
+          setOpenTabIds([stored.selectedNodeId]);
+        }
+      } finally {
+        if (!cancelled) {
+          hydrated.current = true;
+          setSyncStatus(navigator.onLine ? "saved" : "offline");
+        }
       }
-      hydrated.current = true;
-      setSyncStatus(navigator.onLine ? "saved" : "offline");
-    });
-
-    void getCurrentProject()
-      .then((path) => {
-        if (path) setProjectPath(path);
-      })
-      .catch(() => undefined);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1592,13 +1083,13 @@ function App() {
     }).slice(0, 20);
   }, [query, workspace.nodes, workspace.noteMarkdown, workspace.tags]);
   const searchResults = indexedSearchResults ?? fallbackSearchResults;
-  const outlineItems = workspace.editorDocuments?.[selected.id]
-    ? getDocumentOutline(workspace.editorDocuments[selected.id])
-    : (workspace.blocks[selected.id] ?? []).filter((block) =>
-        (block.kind === "heading1" || block.kind === "heading" || block.kind === "heading3") && block.content
-      ).map((block) => ({ id: block.id, content: block.content ?? "" }));
-  const canvasPath = selected.kind === "page"
-    ? getCanvasPathForBlock(workspace.editorDocuments?.[selected.id], activeBlockId)
+  const markdownHeadings = useMemo(
+    () => parseMarkdownHeadings(isMarkdownDocument(selected) ? workspace.noteMarkdown[selected.id] ?? "" : ""),
+    [selected.id, selected.kind, workspace.noteMarkdown],
+  );
+  const outlineItems = markdownHeadings.map((heading) => ({ id: heading.id, content: heading.text, level: heading.level }));
+  const canvasPath = isMarkdownDocument(selected)
+    ? headingPath(markdownHeadings, activeBlockId).map((heading) => ({ id: heading.id, content: heading.text }))
     : [];
 
   useEffect(() => {
@@ -1789,122 +1280,105 @@ function App() {
     window.addEventListener("pointerup", handleUp);
   }
 
-  function updateSelectedNode(patch: Partial<ContentNode>) {
+  function updateDocument(pageId: string, markdown: string) {
     setWorkspace((current) => ({
       ...current,
-      nodes: current.nodes.map((node) => node.id === current.selectedNodeId ? { ...node, ...patch, updatedAt: "刚刚" } : node),
-    }));
-  }
-
-  function updateBlock(blockId: string, content: string) {
-    setWorkspace((current) => ({
-      ...current,
-      blocks: {
-        ...current.blocks,
-        [current.selectedNodeId]: (current.blocks[current.selectedNodeId] ?? []).map((block) =>
-          block.id === blockId ? { ...block, content } : block,
-        ),
-      },
-    }));
-  }
-
-  function updateDocument(pageId: string, document: unknown[], markdown: string) {
-    setWorkspace((current) => ({
-      ...current,
-      editorDocuments: { ...current.editorDocuments, [pageId]: document },
       noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
     }));
   }
 
-  function updateBlockLanguage(blockId: string, language: string) {
-    setWorkspace((current) => ({
-      ...current,
-      blocks: {
-        ...current.blocks,
-        [current.selectedNodeId]: (current.blocks[current.selectedNodeId] ?? []).map((block) =>
-          block.id === blockId ? { ...block, language: normalizeCodeLanguage(language) } : block,
-        ),
-      },
-    }));
-  }
-
-  function applyBlockCommand(blockId: string, command: BlockCommand, content: string, source: "plus" | "slash") {
-    setWorkspace((current) => {
-      const pageId = current.selectedNodeId;
-      const blocks = [...(current.blocks[pageId] ?? [])];
-      const index = blocks.findIndex((block) => block.id === blockId);
-      if (index < 0) return current;
-
-      const isEmbedded = command.kind === "folder" || command.kind === "file";
-      const shouldInsert = (source === "plus" && content.trim().length > 0) || (isEmbedded && content.trim().length > 0);
-      const newId = () => `block-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const nextBlock: NoteBlock = isEmbedded
-        ? { id: shouldInsert ? newId() : blockId, kind: command.kind, targetNodeId: command.targetNodeId }
-        : { id: shouldInsert ? newId() : blockId, kind: command.kind, content, ...(command.kind === "code" ? { language: command.language ?? "plaintext" } : {}) };
-
-      if (shouldInsert) blocks.splice(index + 1, 0, nextBlock);
-      else blocks[index] = nextBlock;
-
-      if (isEmbedded) {
-        blocks.splice(shouldInsert ? index + 2 : index + 1, 0, { id: newId(), kind: "text", content: "" });
-      }
-
-      return { ...current, blocks: { ...current.blocks, [pageId]: blocks } };
-    });
-  }
-
-  function splitBlock(blockId: string, nextId: string, content: string, nextContent: string, nextKind: NoteBlock["kind"]) {
-    setWorkspace((current) => {
-      const pageId = current.selectedNodeId;
-      const blocks = [...(current.blocks[pageId] ?? [])];
-      const index = blocks.findIndex((block) => block.id === blockId);
-      if (index < 0) return current;
-      blocks[index] = { ...blocks[index], content };
-      blocks.splice(index + 1, 0, { id: nextId, kind: nextKind, content: nextContent });
-      return { ...current, blocks: { ...current.blocks, [pageId]: blocks } };
-    });
-  }
-
-  function deleteBlock(blockId: string) {
-    setWorkspace((current) => {
-      const pageId = current.selectedNodeId;
-      const blocks = current.blocks[pageId] ?? [];
-      if (blocks.length <= 1) return current;
-      return {
-        ...current,
-        blocks: { ...current.blocks, [pageId]: blocks.filter((block) => block.id !== blockId) },
-      };
-    });
-  }
-
   function createPage() {
     const parentId = selected.kind === "folder" ? selected.id : selected.parentId;
-    createNode("page", parentId);
+    void createNode("page", parentId);
   }
 
-  function createNode(kind: "page" | "folder", parentId: string | null) {
-    const id = `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  async function createNode(kind: "page" | "folder", parentId: string | null) {
+    const parent = parentId ? workspace.nodes.find((node) => node.id === parentId) : undefined;
+    const parentPath = parentDirectoryPath(parent);
+    if (projectPath && "__TAURI_INTERNALS__" in window) {
+      try {
+        const created = await createWorkspaceEntry(parentPath, kind === "folder" ? "folder" : "file");
+        const node: ContentNode = {
+          id: created.id,
+          parentId,
+          kind: created.kind,
+          title: created.title,
+          fileType: created.fileType ?? undefined,
+          size: created.size ?? undefined,
+          localPath: created.relativePath,
+          fileIdentity: created.fileIdentity ?? undefined,
+          updatedAt: "刚刚",
+        };
+        setWorkspace((current) => ({
+          ...current,
+          selectedNodeId: node.id,
+          nodes: [...current.nodes, node],
+          noteMarkdown: node.kind === "file" ? { ...current.noteMarkdown, [node.id]: "" } : current.noteMarkdown,
+        }));
+        setOpenTabIds((current) => [...current, node.id]);
+        setTreeSelectedId(node.id);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+
+    const title = uniqueSiblingName(
+      workspace.nodes,
+      parentId,
+      kind === "folder" ? "新建文件夹" : "未命名页面.md",
+    );
+    const localPath = parentPath ? `${parentPath}/${title}` : title;
+    const id = `${kind === "folder" ? "folder" : "file"}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setWorkspace((current) => ({
       ...current,
       selectedNodeId: id,
       nodes: [...current.nodes, {
         id,
         parentId,
-        kind,
-        title: kind === "folder" ? "新建文件夹" : "未命名页面",
+        kind: kind === "folder" ? "folder" : "file",
+        title,
+        fileType: kind === "folder" ? undefined : "MD",
+        localPath,
         updatedAt: "刚刚",
       }],
-      blocks: kind === "page" ? { ...current.blocks, [id]: [{ id: `${id}-block`, kind: "text", content: "" }] } : current.blocks,
+      noteMarkdown: kind === "page" ? { ...current.noteMarkdown, [id]: "" } : current.noteMarkdown,
     }));
     setOpenTabIds((current) => [...current, id]);
     setTreeSelectedId(id);
   }
 
-  function renameNode(id: string, title: string) {
+  async function renameNode(id: string, title: string) {
     if (!title) return;
+    const target = workspace.nodes.find((node) => node.id === id);
+    if (!target) return;
+    let nextPath = target.localPath;
+    if (target.localPath && projectPath) {
+      try {
+        nextPath = await renameWorkspaceEntry(target.localPath, title);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+    const previousPath = target.localPath;
     setWorkspace((current) => ({
       ...current,
-      nodes: current.nodes.map((node) => node.id === id ? { ...node, title, updatedAt: "刚刚" } : node),
+      nodes: current.nodes.map((node) => {
+        if (node.id === id) {
+          return {
+            ...node,
+            title,
+            localPath: nextPath,
+            fileType: node.kind === "file" ? title.split(".").at(-1)?.toUpperCase() : node.fileType,
+            updatedAt: "刚刚",
+          };
+        }
+        if (previousPath && nextPath && node.localPath?.startsWith(`${previousPath}/`)) {
+          return { ...node, localPath: `${nextPath}${node.localPath.slice(previousPath.length)}` };
+        }
+        return node;
+      }),
     }));
   }
 
@@ -1980,7 +1454,7 @@ function App() {
     });
   }
 
-  function deleteNodes(ids: string[]) {
+  async function deleteNodes(ids: string[]) {
     const roots = new Set(ids);
     const allIds = new Set(ids);
     let changed = true;
@@ -1995,6 +1469,18 @@ function App() {
     }
     const names = workspace.nodes.filter((node) => roots.has(node.id)).map((node) => `“${node.title}”`).join("、");
     if (!window.confirm(`确定删除 ${names} 吗？文件夹内的内容也会被删除。`)) return;
+    const diskPaths = workspace.nodes
+      .filter((node) => roots.has(node.id))
+      .map((node) => node.localPath)
+      .filter((path): path is string => Boolean(path));
+    if (diskPaths.length > 0 && projectPath) {
+      try {
+        await deleteWorkspaceEntries(diskPaths);
+      } catch (error) {
+        window.alert(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     const fallbackId = `page-${Date.now()}-fallback`;
     const leavesWorkspaceEmpty = workspace.nodes.every((node) => allIds.has(node.id));
 
@@ -2007,14 +1493,10 @@ function App() {
         title: "未命名页面",
         updatedAt: "刚刚",
       }];
-      const remainingBlocks = Object.fromEntries(Object.entries(current.blocks).filter(([id]) => !allIds.has(id)));
-      const editorDocuments = Object.fromEntries(Object.entries(current.editorDocuments ?? {}).filter(([id]) => !allIds.has(id)));
-      const blocks = remainingNodes.length > 0 ? remainingBlocks : {
-        ...remainingBlocks,
-        [fallbackId]: [{ id: `${fallbackId}-block`, kind: "text" as const, content: "" }],
-      };
+      const remainingMarkdown = Object.fromEntries(Object.entries(current.noteMarkdown).filter(([id]) => !allIds.has(id)));
+      const noteMarkdown = remainingNodes.length > 0 ? remainingMarkdown : { ...remainingMarkdown, [fallbackId]: "" };
       const selectedNodeId = allIds.has(current.selectedNodeId) ? nodes[0]?.id ?? "" : current.selectedNodeId;
-      return { ...current, nodes, blocks, editorDocuments, selectedNodeId };
+      return { ...current, nodes, noteMarkdown, selectedNodeId };
     });
     setOpenTabIds((current) => {
       const remaining = current.filter((id) => !allIds.has(id));
@@ -2040,7 +1522,7 @@ function App() {
             nodes={workspace.nodes}
             projectName={projectName}
             canvasPath={canvasPath}
-            editorDocument={workspace.editorDocuments?.[selected.id]}
+            headings={markdownHeadings}
             onSelectNode={selectNode}
             onSelectHeading={(blockId) => {
               setActiveBlockId(blockId);
@@ -2092,6 +1574,10 @@ function App() {
               gitLoading={gitLoading}
               onRefreshGit={() => void refreshGitStatus()}
               onSelectNode={selectNode}
+              onSelectHeading={(headingId) => {
+                setActiveBlockId(headingId);
+                requestAnimationFrame(() => focusCanvasBlock(headingId));
+              }}
               onClose={() => setPrimaryLeftTool(null)}
             />
           ) : null}
@@ -2101,6 +1587,10 @@ function App() {
               outlineItems={outlineItems}
               bookmarks={workspace.nodes.filter((node) => node.favorite)}
               onSelectNode={selectNode}
+              onSelectHeading={(headingId) => {
+                setActiveBlockId(headingId);
+                requestAnimationFrame(() => focusCanvasBlock(headingId));
+              }}
               onClose={() => setSecondaryLeftTool(null)}
             />
           )}
@@ -2121,14 +1611,15 @@ function App() {
           <section className="workspace-canvas" role="tabpanel" onContextMenu={(event) => event.preventDefault()}>
             {openTabs.length === 0 ? (
               <div className="blank-workspace"><FileText size={34} /><p>从项目列表中选择一个页面</p></div>
-            ) : selected.kind === "page" ? (
+            ) : isMarkdownDocument(selected) ? (
               <NoteView
                 node={selected}
                 workspace={workspace}
                 readOnly={selectedReadOnly}
-                onTitleChange={(title) => { if (!selectedReadOnly) updateSelectedNode({ title }); }}
-                onDocumentChange={(document, markdown) => { if (!selectedReadOnly) updateDocument(selected.id, document, markdown); }}
-                onActiveBlockChange={setActiveBlockId}
+                onMarkdownChange={(markdown) => { if (!selectedReadOnly) updateDocument(selected.id, markdown); }}
+                onNavigateNode={selectNode}
+                onActiveHeadingChange={setActiveBlockId}
+                onCursorChange={setCursorPosition}
               />
             ) : <EmptyView node={selected} />}
           </section>

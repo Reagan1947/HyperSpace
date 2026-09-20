@@ -55,8 +55,8 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .note-page *,
 .editor,
 .editor *,
-.hyperspace-blocknote,
-.hyperspace-blocknote * {
+.hyperspace-vditor,
+.hyperspace-vditor * {
   user-select: text;
   -webkit-user-select: text;
 }
@@ -224,7 +224,8 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .project-panel-header .panel-header-actions button { width: 22px; height: 20px; }
 .project-tree { min-height: 0; flex: 1; padding: 6px 0 0; background: var(--color-bg-content); overflow: hidden; outline: none; }
 .project-tree > div { overflow-x: hidden !important; }
-.tree-item { position: relative; width: 100%; height: 26px; display: flex; align-items: center; gap: 5px; padding-right: 6px; border: 0; border-radius: 0; background: transparent; color: #5e5a54; font-size: 12px; cursor: grab; white-space: nowrap; touch-action: none; }
+.workspace-tree-content [role="treeitem"] { max-width: 100%; min-width: 0 !important; }
+.tree-item { position: relative; width: 100%; min-width: 0; max-width: 100%; height: 26px; display: flex; align-items: center; gap: 5px; padding-right: 6px; border: 0; border-radius: 0; background: transparent; color: #5e5a54; font-size: 12px; cursor: grab; white-space: nowrap; touch-action: none; }
 .tree-item.selected { background: #d5d5d5; color: #5e5a54; }
 .tree-item.focused:not(.selected) { box-shadow: inset 0 0 0 1px #0071e366; }
 .tree-item.drop-target { background: var(--color-accent-soft); box-shadow: inset 0 0 0 1px var(--color-accent); }
@@ -253,7 +254,8 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .project-tree:focus-within .tree-item.selected > svg { color: #fff; }
 .project-tree:focus-within .tree-item.selected .tree-node-icon { filter: brightness(0) invert(1); }
 .tree-label { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.tree-tags { max-width: 46%; display: flex; flex: 0 1 auto; align-items: center; gap: 3px; overflow: hidden; }
+.tree-item:has(.tree-tags) .tree-label { padding-right: 16px; }
+.tree-tags { max-width: 46%; display: flex; flex: 0 0 auto; align-items: center; gap: 3px; overflow: hidden; }
 .tree-tag { min-width: 0; height: 17px; display: inline-flex; align-items: center; padding: 0 5px; border: 1px solid #d8d5d0; border-radius: 2px; background: #ebe9e5; color: #5e5a54; font-size: 9px; line-height: 1; }
 .tree-tag > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .tree-tag-more { flex: 0 0 auto; color: #817c74; font-size: 9px; }
@@ -424,230 +426,208 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .status-dot.loading, .status-dot.saving { background: #d09a43; }
 .status-dot.offline { background: #c45e58; }
 
-.note-page { width: min(820px, calc(100% - 72px)); min-height: 100%; margin: 0 auto; padding: 52px 0 100px; }
-.note-title-row { display: flex; align-items: center; gap: 13px; margin-bottom: 36px; }
-.note-title-row h1 { min-width: 80px; margin: 0; color: var(--color-accent); font-size: 34px; line-height: 1.2; font-weight: 620; letter-spacing: -.02em; }
+/* Full-bleed so the editor toolbar can span the window; the text column is
+   centred further down, on the editing surface itself. */
+.note-page { width: 100%; min-height: 100%; margin: 0; padding: 0 0 100px; }
 .empty-view > small { color: var(--color-text-muted); font-size: 10px; }
 .mini-avatar { width: 19px; height: 19px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 50%; background: #e2d7d0; color: #5b514c; font-size: 7px; font-weight: 700; }
-.editor { padding-left: 0; }
+/* The measure every editing surface below centres itself on. */
+.editor { padding-left: 0; --editor-measure: 700px; --editor-gutter: 28px; --editor-column: calc(var(--editor-measure) + var(--editor-gutter) * 2); }
 .editor-loading { min-height: 120px; display: grid; place-items: center; color: var(--color-text-muted); font-size: 12px; }
-.hyperspace-blocknote {
-  --bn-colors-editor-text: #45484d;
-  --bn-colors-editor-background: transparent;
-  --bn-colors-menu-text: #292723;
-  --bn-colors-menu-background: #fff;
-  --bn-colors-hovered-text: #174f83;
-  --bn-colors-hovered-background: #eaf3ff;
-  --bn-colors-selected-text: #fff;
-  --bn-colors-selected-background: #0071e3;
-  --bn-colors-border: #dedad2;
-  --bn-colors-side-menu: #a9a49c;
-  --bn-colors-shadow: #332d2426;
-  --editor-paragraph-gap: 10px;
-  --editor-list-gap: 2px;
-  width: 100%;
-  max-width: 746px;
-  background: transparent;
-}
-.hyperspace-blocknote .bn-editor {
-  padding-inline: 0;
-  background: transparent;
-  font-family: inherit;
-}
-.hyperspace-blocknote .bn-default-styles {
-  color: #333336;
-  font-family: inherit;
-  font-size: 16px;
-  letter-spacing: 0;
-  line-break: strict;
-  overflow-wrap: break-word;
-  word-break: normal;
-}
-.hyperspace-blocknote .bn-inline-content code,
-.hyperspace-blocknote .bn-inline-content [data-style-type="code"] {
-  padding: .125em .3em;
-  border-radius: 4px;
-  background-color: var(--color-bg-code);
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
-  font-family: var(--font-code);
-}
-.hyperspace-blocknote .bn-inline-content a,
-.hyperspace-blocknote .bn-inline-content-section[data-inline-content-type="link"] {
-  color: #0071e3;
-}
-.hyperspace-blocknote .bn-inline-content-section[data-inline-content-type="math"] .katex {
-  font-size: 1em;
-}
-.hyperspace-blocknote [data-style-type="superscript"] {
-  position: relative;
-  top: -.5em;
-  vertical-align: baseline;
-  font-size: .75em;
-  line-height: 0;
-}
-.hyperspace-blocknote [data-style-type="subscript"] {
-  position: relative;
-  bottom: -.25em;
-  vertical-align: baseline;
-  font-size: .75em;
-  line-height: 0;
-}
-.hyperspace-blocknote .bn-block-outer { line-height: 1.75; }
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="paragraph"] {
-  margin: 0 0 var(--editor-paragraph-gap);
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="bulletListItem"],
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="numberedListItem"],
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="checkListItem"] {
-  margin-bottom: var(--editor-list-gap);
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"] {
-  /* BlockNote adds 18px here by default; spacing is owned by the margins below. */
-  padding-top: 3px;
-  color: var(--color-accent);
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="1"] {
-  margin: 28px 0 10px;
-  font-size: 28px;
-  line-height: 1.35;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="1"] > .bn-inline-content {
-  font-size: 28px;
-  font-weight: 680;
-  letter-spacing: 0;
-  line-height: 1.35;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="2"] {
-  margin: 24px 0 8px;
-  font-size: 22px;
-  line-height: 1.4;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="2"] > .bn-inline-content {
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: 0;
-  line-height: 1.4;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="3"] {
-  margin: 18px 0 6px;
-  font-size: 18px;
-  line-height: 1.5;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="heading"][data-level="3"] > .bn-inline-content {
-  font-size: 18px;
-  font-weight: 640;
-  letter-spacing: 0;
-  line-height: 1.5;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="codeBlock"] {
-  border: 0;
-  background: var(--color-bg-code);
-  color: #333336;
-  font-family: var(--font-code);
-  font-size: 13px;
-  line-height: 1.6;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="codeBlock"] > pre {
-  padding: 18px 16px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="codeBlock"] .shiki,
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="codeBlock"] .shiki span {
-  color: var(--shiki-light, #333336) !important;
-}
-.hyperspace-blocknote .bn-editor.bn-default-styles .bn-block-content[data-content-type="codeBlock"] > div > select {
-  top: 2px;
-  left: 16px;
-  color: #707781;
-  font-family: var(--font-code);
-}
-.hyperspace-blocknote .bn-side-menu button:hover { color: var(--color-accent); }
-.hyperspace-blocknote .bn-block-content[data-content-type="quote"] {
-  position: relative;
-}
-.hyperspace-blocknote .bn-block-content[data-content-type="quote"] blockquote {
-  width: 100%;
-  box-sizing: border-box;
-  padding-block: 15px;
-  border-left-color: var(--color-accent);
-  background: #f6f7f9;
-}
-/* BlockNote renders the empty-block placeholder on .bn-block-content::after.
-   Quote padding + full-width blockquote otherwise push it to the trailing edge. */
-.hyperspace-blocknote .bn-block-content[data-content-type="quote"]:has(.ProseMirror-trailingBreak:only-child)::after {
-  position: absolute;
-  top: calc(3px + 15px);
-  left: calc(2px + 1em);
-  margin-inline: 0;
-  max-width: calc(100% - 2px - 1em);
-}
-.hyperspace-blocknote .blocknote-embed { width: 100%; margin: 10px 0 16px; }
-.hyperspace-blocknote .bn-block-content[data-content-type="folderEmbed"],
-.hyperspace-blocknote .bn-block-content[data-content-type="fileEmbed"] { padding: 0; }
-.editable-row { position: relative; margin: 0 0 15px; }
-.editable-row .block-handle { position: absolute; top: 4px; left: -28px; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #b2b5ba; cursor: pointer; opacity: 0; }
-.editable-row:hover .block-handle { opacity: 1; }
-.block-handle:hover { background: #efede8 !important; color: #625d56 !important; }
-.block-command-menu { position: absolute; z-index: 50; top: calc(100% + 4px); left: -28px; width: min(360px, calc(100vw - 120px)); max-height: 320px; padding: 6px; border: 1px solid var(--color-border); border-radius: 9px; background: #fff; box-shadow: 0 12px 32px #332d2426, 0 2px 8px #332d2412; overflow-y: auto; }
-.block-command-heading { padding: 5px 8px 7px; color: #99948c; font-size: 10px; font-weight: 600; }
-.block-command-menu > button { width: 100%; min-height: 48px; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; cursor: pointer; text-align: left; }
-.block-command-menu > button:hover, .block-command-menu > button.active { background: var(--color-bg-hover); }
-.block-command-menu > button > span:first-child { width: 31px; height: 31px; display: grid; flex: 0 0 auto; place-items: center; border: 1px solid var(--color-border-soft); border-radius: 6px; background: #f5f9ff; color: var(--color-accent); }
-.block-command-menu > button > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.block-command-menu strong, .block-command-menu small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.block-command-menu strong { font-size: 12px; font-weight: 600; }
-.block-command-menu small { color: var(--color-text-muted); font-size: 10px; }
-.block-command-empty { margin: 8px; color: var(--color-text-muted); font-size: 11px; }
-.editable-row p, .editable-row h1, .editable-row h2, .editable-row h3, .editable-row blockquote, .editable-row pre { margin: 0; border-radius: 4px; }
-.editable-row p { color: #45484d; font-size: 15px; line-height: 1.85; }
-.editable-row h1 { margin-top: 32px; font-size: 27px; line-height: 1.4; font-weight: 680; }
-.editable-row h2 { margin-top: 28px; font-size: 21px; line-height: 1.5; font-weight: 650; }
-.editable-row h3 { margin-top: 22px; font-size: 17px; line-height: 1.55; font-weight: 640; }
-.editable-row.bullet, .editable-row.ordered { padding-left: 22px; }
-.editable-row.bullet::before, .editable-row.ordered::before { position: absolute; left: 5px; top: 3px; color: #74716b; font-size: 14px; line-height: 1.85; }
-.editable-row.bullet::before { content: "•"; }
-.editable-row.ordered::before { content: "1."; font-size: 12px; }
-.editable-row blockquote { padding: 15px 12px; border-left: 3px solid var(--color-accent); background: #f6f7f9; color: #68645e; font-size: 15px; line-height: 1.75; }
-.editable-row pre { padding: 18px 16px; border: 1px solid #e1e5ea; background: #f7f8fa; color: #333336; font-family: var(--font-code); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
-.code-block-editor { margin: 16px 0 24px; border: 1px solid #d9dfe6; border-radius: 8px; background: #f7f8fa; overflow: hidden; }
-.code-block-toolbar { height: 35px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border-bottom: 1px solid #e1e5ea; background: #f1f3f5; color: #707781; }
-.code-block-toolbar select { height: 26px; padding: 0 24px 0 5px; border: 0; border-radius: 4px; outline: 0; background: transparent; color: #555c65; cursor: pointer; font-size: 11px; }
-.code-block-toolbar select:hover, .code-block-toolbar select:focus { background: #e6ebf0; }
-.code-editor-body { position: relative; min-height: 150px; }
-.code-editor-body pre, .code-editor-body textarea { width: 100%; min-height: 150px; margin: 0; padding: 18px 16px; border: 0; font-family: var(--font-code); font-size: 13px; line-height: 1.6; tab-size: 2; white-space: pre; overflow: auto; }
-.code-editor-body pre { position: absolute; inset: 0; background: #f7f8fa; pointer-events: none; }
-.code-editor-body pre code.hljs { padding: 0; background: transparent; overflow: visible; }
-.code-editor-body textarea { position: relative; display: block; resize: vertical; outline: 0; background: transparent; color: transparent; caret-color: #20252b; -webkit-text-fill-color: transparent; }
-.code-editor-body textarea::selection { background: #b9d8f8; }
-[contenteditable]:empty::before { content: attr(data-placeholder); color: #b4b7bc; pointer-events: none; }
-.callout-block { display: flex; align-items: flex-start; gap: 12px; margin: 15px 0 23px; padding: 15px 17px; border: 1px solid #cfe4fb; border-radius: 8px; background: #f2f8ff; color: #245781; font-size: 13px; line-height: 1.7; }
-.callout-block > svg { flex: 0 0 auto; margin-top: 2px; color: var(--color-accent); }
-.embedded-folder { margin: 18px 0 30px; border: 1px solid #dfe1e5; border-radius: 8px; background: #fff; overflow: hidden; }
-.embedded-heading { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid #eeeae4; background: #faf9f6; }
-.folder-badge { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 6px; background: #eee4cf; color: #866d3a; }
-.embedded-heading div { display: flex; flex: 1; flex-direction: column; gap: 2px; }
-.embedded-heading strong { font-size: 12px; }
-.embedded-heading span { color: var(--color-text-muted); font-size: 9px; }
-.embedded-heading button { border: 0; background: transparent; color: #8a8d92; cursor: pointer; }
-.file-list { padding: 4px 6px; }
-.file-row { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px; border: 0; border-radius: 5px; background: transparent; cursor: pointer; text-align: left; }
-.file-row:hover { background: #f6f4f0; }
-.file-type { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; background: #faebe8; color: #a9554c; }
-.file-type.xlsx { background: #e7f2ec; color: #38765b; }
-.file-main { display: flex; flex: 1; flex-direction: column; gap: 3px; }
-.file-main strong { font-size: 11px; font-weight: 550; }
-.file-main small, .file-time { color: #96999e; font-size: 9px; }
-.file-row > svg { color: #999ca1; }
-.embedded-file { width: 100%; display: flex; align-items: center; gap: 11px; margin: 13px 0 25px; padding: 11px 12px; border: 1px solid #dfe1e5; border-radius: 7px; background: #fff; cursor: pointer; text-align: left; }
-.embedded-file:hover { border-color: #c9ccd1; }
-.pdf-mark { width: 35px; height: 38px; display: grid; place-items: center; border-radius: 5px; background: #fae9e6; color: #aa4d43; font-size: 8px; font-weight: 800; }
-.embedded-file > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 4px; }
-.embedded-file strong { font-size: 11px; }
-.embedded-file small { color: var(--color-text-muted); font-size: 9px; }
-.open-label { color: var(--color-accent); font-size: 9px; }
+.hyperspace-vditor { position: relative; width: 100%; border: 0; background: transparent; }
+.hyperspace-vditor__host:not(.is-ready) { position: absolute; width: 100%; height: 0; overflow: hidden; visibility: hidden; }
+.hyperspace-vditor__pending { min-height: 320px; max-width: var(--editor-column); margin: 0 auto; padding: 30px var(--editor-gutter) 80px; }
+.hyperspace-vditor__boot { margin: 0; color: #333336; background: transparent; font-family: inherit; font-size: 16px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: break-word; }
+.hyperspace-vditor__placeholder { margin: 0; color: #9a9590; font-size: 16px; }
+/* .vditor declares its own font stack, which every descendant inherits, and it
+   owns the variables the IR markers are painted with. */
+.hyperspace-vditor .vditor { border: 0; background: transparent; font-family: inherit; --second-color: #a9a49c; --heading-border-color: var(--color-border-soft); --blockquote-color: #57534d; --textarea-text-color: #333336; --ir-heading-color: #b0a89c; --ir-bi-color: #b0a89c; --ir-title-color: #9a958e; --ir-link-color: #9a958e; --ir-paren-color: #9a958e; --ir-bracket-color: var(--color-accent); }
+/* Editor toolbar: same chrome vocabulary as .panel-header and .ide-toolbar. It
+   spans the canvas and sticks to the top of it, so it reads as a second bar
+   under .workspace-tabs rather than as part of the document.
+   !important overrides Vditor's inline padding-left, which tracks the centring
+   padding it puts on the editing surface — room this bar has no use for. */
+.hyperspace-vditor .vditor-toolbar { position: sticky; z-index: 8; top: 0; width: 100%; min-height: var(--menubar-height); display: flex; align-items: center; flex-wrap: wrap; gap: 0; padding: 2px 8px !important; border: 0; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
+.hyperspace-vditor .vditor-toolbar__item { display: flex; flex: 0 0 auto; align-items: center; }
+.hyperspace-vditor .vditor-toolbar__item button { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-icon); cursor: pointer; }
+.hyperspace-vditor .vditor-toolbar__item button svg { width: 14px; height: 14px; display: block; fill: currentColor; }
+.hyperspace-vditor .vditor-toolbar__item button svg.hs-toolbar-icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.hyperspace-vditor .vditor-toolbar__item button:hover { background: var(--color-bg-hover); color: var(--color-text); }
+.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--current { background: var(--color-bg-active); color: var(--color-text) !important; }
+.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled { cursor: default; opacity: .38; }
+.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled:hover { background: transparent; color: var(--color-icon); }
+.hyperspace-vditor .vditor-toolbar__divider { width: 1px; height: 15px; margin: 0 5px; border: 0; background: var(--color-border); }
+/* The divider in front of undo becomes the gap that splits the bar: authoring
+   tools stay left, the view controls after it are pushed right. */
+.hyperspace-vditor .vditor-toolbar__divider:has(+ .vditor-toolbar__item > button[data-type="undo"]) { min-width: 16px; flex: 1; margin: 0; background: transparent; }
+
+/* Toolbar dropdowns match .tab-overflow-menu. The panel needs an explicit anchor
+   because the flex toolbar item would otherwise centre it over the button. */
+.hyperspace-vditor .vditor-toolbar__item > .vditor-hint { top: calc(100% + 4px); left: 0; }
+.hyperspace-vditor .vditor-toolbar__item > .vditor-hint.vditor-panel--left { right: 0; left: auto; }
+.hyperspace-vditor .vditor-hint { min-width: 176px; padding: 5px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-canvas); box-shadow: 0 8px 24px #38332c24, 0 2px 6px #38332c12; font-size: 12px; }
+.hyperspace-vditor .vditor-hint::before,
+.hyperspace-vditor .vditor-hint::after { display: none; }
+.hyperspace-vditor .vditor-hint > button { width: 100%; min-height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: #514d47; cursor: pointer; font-size: 12px; line-height: normal; text-align: left; }
+.hyperspace-vditor .vditor-hint > button:hover,
+.hyperspace-vditor .vditor-hint > button.vditor-hint--current { background: var(--color-bg-hover) !important; color: var(--color-text) !important; }
+.hyperspace-vditor .vditor-hint > button.vditor-menu--current { background: var(--color-accent-soft); color: var(--color-accent-text) !important; }
+/* Clicks must always land on the button itself, never on these labels. */
+.hyperspace-vditor .vditor-hint > button > * { pointer-events: none; }
+.hyperspace-vditor .vditor-hint > button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hyperspace-vditor .vditor-hint > button > kbd { flex: 0 0 auto; color: #9a958e; font-family: inherit; font-size: 11px; }
+.hyperspace-vditor .vditor-hint > button:hover > kbd { color: inherit; }
+/* Vditor's content and code themes are not loaded (see VditorEditor.tsx), so
+   everything a document can contain is styled below — there is no fallback. The
+   `:not()` chains mirror Vditor's own selectors so these rules win on
+   specificity rather than on stylesheet order. */
+.hyperspace-vditor .vditor-content,
+.hyperspace-vditor .vditor-ir,
+.hyperspace-vditor .vditor-wysiwyg,
+.hyperspace-vditor .vditor-sv,
+.hyperspace-vditor .vditor-ir pre.vditor-reset { min-height: 320px; background: transparent !important; }
+/* The mode columns run edge to edge so the toolbar above them can too; the
+   measure is held by the editing surface inside, which centres itself.
+   !important beats Vditor's inline padding (its own centring) and the inline
+   max-width it writes onto the preview surface from preview.maxWidth. */
+.hyperspace-vditor .vditor-ir,
+.hyperspace-vditor .vditor-wysiwyg,
+.hyperspace-vditor .vditor-preview { max-width: none; padding: 0 !important; }
+.hyperspace-vditor .vditor-reset { width: 100%; max-width: var(--editor-column) !important; margin: 0 auto; padding: 30px var(--editor-gutter) 80px !important; color: #333336; font-family: inherit; font-size: 16px; line-height: 1.75; letter-spacing: 0; line-break: strict; overflow-wrap: break-word; word-break: normal; }
+/* Vditor zeroes the margin on the editable surfaces from a longer selector. */
+.hyperspace-vditor .vditor-ir pre.vditor-reset,
+.hyperspace-vditor .vditor-wysiwyg pre.vditor-reset { margin: 0 auto; }
+.hyperspace-vditor .vditor-reset > :first-child,
+.hyperspace-vditor .vditor-ir > :first-child,
+.hyperspace-vditor .vditor-wysiwyg > :first-child { margin-top: 0 !important; }
+.hyperspace-vditor .vditor-reset p { margin: 0 0 10px; text-indent: 0; }
+
+/* Headings. Every level is declared so the scale stays monotonic, and the
+   borders come from Vditor's GitHub heritage rather than this design. */
+.hyperspace-vditor .vditor-reset h1,
+.hyperspace-vditor .vditor-reset h2,
+.hyperspace-vditor .vditor-reset h3,
+.hyperspace-vditor .vditor-reset h4,
+.hyperspace-vditor .vditor-reset h5,
+.hyperspace-vditor .vditor-reset h6 { padding: 0; border: 0; color: var(--color-accent); letter-spacing: 0; }
+.hyperspace-vditor .vditor-reset h1 { margin: 28px 0 10px; font-size: 28px; line-height: 1.35; font-weight: 680; }
+.hyperspace-vditor .vditor-reset h2 { margin: 24px 0 8px; font-size: 22px; line-height: 1.4; font-weight: 650; }
+.hyperspace-vditor .vditor-reset h3 { margin: 18px 0 6px; font-size: 18px; line-height: 1.5; font-weight: 640; }
+.hyperspace-vditor .vditor-reset h4 { margin: 16px 0 6px; font-size: 16px; line-height: 1.55; font-weight: 640; }
+.hyperspace-vditor .vditor-reset h5 { margin: 14px 0 4px; font-size: 14px; line-height: 1.6; font-weight: 640; }
+.hyperspace-vditor .vditor-reset h6 { margin: 14px 0 4px; color: var(--color-text-muted); font-size: 13px; line-height: 1.6; font-weight: 640; }
+/* IR prints an H1…H6 badge into a left gutter this flush-left layout does not
+   reserve, so it would only ever be clipped. */
+.hyperspace-vditor .vditor-ir .vditor-reset > h1::before,
+.hyperspace-vditor .vditor-ir .vditor-reset > h2::before,
+.hyperspace-vditor .vditor-ir .vditor-reset > h3::before,
+.hyperspace-vditor .vditor-ir .vditor-reset > h4::before,
+.hyperspace-vditor .vditor-ir .vditor-reset > h5::before,
+.hyperspace-vditor .vditor-ir .vditor-reset > h6::before,
+.hyperspace-vditor .vditor-ir div[data-type="link-ref-defs-block"]::before,
+.hyperspace-vditor .vditor-ir div[data-type="footnotes-block"]::before,
+.hyperspace-vditor .vditor-ir .vditor-toc::before { content: none; }
+
+.hyperspace-vditor .vditor-reset ul,
+.hyperspace-vditor .vditor-reset ol { margin: 0 0 10px; padding-left: 1.6em; }
+.hyperspace-vditor .vditor-reset li { margin: 0 0 2px; }
+.hyperspace-vditor .vditor-reset li + li { margin-top: 2px; }
+.hyperspace-vditor .vditor-reset li p { margin-top: 0; }
+.hyperspace-vditor .vditor-reset .vditor-task input { margin: 0 .45em .2em -1.3em; }
+.hyperspace-vditor .vditor-reset a { color: var(--color-accent); text-decoration: none; }
+.hyperspace-vditor .vditor-reset a:hover { text-decoration: underline; }
+.hyperspace-vditor .vditor-reset img { max-width: 100%; border-radius: 6px; }
+.hyperspace-vditor .vditor-reset hr { height: 1px; margin: 22px 0; padding: 0; border: 0; background: var(--color-border); }
+.hyperspace-vditor .vditor-reset kbd { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg-canvas); box-shadow: none; color: var(--color-text); font: 11px/1.4 var(--font-code); }
+.hyperspace-vditor .vditor-reset blockquote { margin: 0 0 10px; padding: 12px 16px; border-left: 3px solid var(--color-accent); border-radius: 0 6px 6px 0; background: #f4f3ef; color: #57534d; }
+.hyperspace-vditor .vditor-reset blockquote > :last-child { margin-bottom: 0; }
+
+.hyperspace-vditor .vditor-reset table { width: auto; margin: 0 0 12px; border-collapse: collapse; font-size: 14px; }
+.hyperspace-vditor .vditor-reset table tr { border-top: 0; background: transparent; }
+.hyperspace-vditor .vditor-reset table th,
+.hyperspace-vditor .vditor-reset table td { padding: 7px 12px; border: 1px solid var(--color-border); white-space: normal; }
+.hyperspace-vditor .vditor-reset table th { background: #f1efea; font-weight: 640; }
+.hyperspace-vditor .vditor-reset table tbody tr:nth-child(2n) { background: #faf9f6; }
+
+/* Code. The box belongs to the <pre> and the <code> is stripped bare, so the
+   rendered block and the raw one IR swaps in under the caret look identical. */
+.hyperspace-vditor .vditor-reset code:not(.hljs):not(.highlight-chroma) { padding: 2px 5px; border-radius: 4px; background: #ece9e4; background-image: none; color: #4a4641; font-family: var(--font-code); font-size: .86em; }
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"] > pre:not(.hs-embed-host),
+.hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"] > pre:not(.hs-embed-host),
+.hyperspace-vditor .vditor-wysiwyg pre:not(.vditor-reset):not(.hs-embed-host),
+.hyperspace-vditor .vditor-preview pre:not(.vditor-reset):not(.hs-embed-host) { margin: 12px 0; padding: 12px 14px; border: 0; border-radius: 8px; background: var(--color-bg-code); }
+.hyperspace-vditor .vditor-reset pre > code:not(.hljs):not(.highlight-chroma),
+.hyperspace-vditor .vditor-reset pre > code.hljs { padding: 0; border-radius: 0; background: transparent; background-image: none; color: #3a3a3d; font-family: var(--font-code); font-size: 13px; line-height: 1.7; }
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"]::before,
+.hyperspace-vditor .vditor-ir__node[data-type="code-block"]::after,
+.hyperspace-vditor .vditor-ir__marker--info { color: var(--ir-heading-color); font-family: var(--font-code); font-size: 13px; }
+/* Expanding a block leaves the source <pre> inline, and an inline box whose only
+   child is a block paints no background — so it would lose its frame. */
+.hyperspace-vditor .vditor-ir__node--expand > pre.vditor-ir__marker--pre { display: block; }
+/* Vditor pins the line-number column with !important padding that assumes the
+   <code> keeps its own 1em inset; both ends have to be restated together. */
+.hyperspace-vditor .vditor-reset pre > code.vditor-linenumber { padding-left: 3.2em !important; }
+.hyperspace-vditor .vditor-reset .vditor-linenumber__rows { top: 0; width: 2.2em; }
+.hyperspace-vditor .vditor-reset .vditor-linenumber__rows > span::before { padding-right: .9em; color: #bdb7ad; }
+.hyperspace-vditor .vditor-reset .vditor-copy span { top: 6px; right: 8px; padding: 4px; border-radius: 4px; background: #ffffffd9; }
+.hyperspace-vditor .vditor-reset .vditor-copy svg { color: var(--color-icon); }
+
+/* Syntax palette, replacing highlight.js' own theme stylesheet. */
+.hyperspace-vditor .vditor-reset .hljs-comment,
+.hyperspace-vditor .vditor-reset .hljs-quote { color: #8c877f; font-style: italic; }
+.hyperspace-vditor .vditor-reset .hljs-keyword,
+.hyperspace-vditor .vditor-reset .hljs-selector-tag,
+.hyperspace-vditor .vditor-reset .hljs-subst,
+.hyperspace-vditor .vditor-reset .hljs-doctag,
+.hyperspace-vditor .vditor-reset .hljs-template-tag,
+.hyperspace-vditor .vditor-reset .hljs-meta { color: #a0356a; }
+.hyperspace-vditor .vditor-reset .hljs-string,
+.hyperspace-vditor .vditor-reset .hljs-regexp,
+.hyperspace-vditor .vditor-reset .hljs-addition,
+.hyperspace-vditor .vditor-reset .hljs-attribute,
+.hyperspace-vditor .vditor-reset .hljs-selector-attr,
+.hyperspace-vditor .vditor-reset .hljs-selector-pseudo { color: #3c7a4f; }
+.hyperspace-vditor .vditor-reset .hljs-number,
+.hyperspace-vditor .vditor-reset .hljs-literal,
+.hyperspace-vditor .vditor-reset .hljs-variable,
+.hyperspace-vditor .vditor-reset .hljs-template-variable,
+.hyperspace-vditor .vditor-reset .hljs-symbol,
+.hyperspace-vditor .vditor-reset .hljs-bullet { color: #9a5b1f; }
+.hyperspace-vditor .vditor-reset .hljs-title,
+.hyperspace-vditor .vditor-reset .hljs-section,
+.hyperspace-vditor .vditor-reset .hljs-name,
+.hyperspace-vditor .vditor-reset .hljs-attr,
+.hyperspace-vditor .vditor-reset .hljs-selector-id,
+.hyperspace-vditor .vditor-reset .hljs-selector-class { color: #2f5fbf; }
+.hyperspace-vditor .vditor-reset .hljs-built_in,
+.hyperspace-vditor .vditor-reset .hljs-type,
+.hyperspace-vditor .vditor-reset .hljs-class,
+.hyperspace-vditor .vditor-reset .hljs-formula { color: #1f6d78; }
+.hyperspace-vditor .vditor-reset .hljs-operator,
+.hyperspace-vditor .vditor-reset .hljs-code { color: #6b6660; }
+.hyperspace-vditor .vditor-reset .hljs-deletion { color: #b23c3c; }
+.hyperspace-vditor .vditor-reset .hljs-emphasis { font-style: italic; }
+.hyperspace-vditor .vditor-reset .hljs-strong { font-weight: 700; }
+.hyperspace-vditor.vditor--fullscreen,
+.hyperspace-vditor .vditor--fullscreen { z-index: 200; }
+.note-page.read-only .vditor-toolbar { opacity: .72; }
+.vditor-fallback { max-width: var(--editor-column); display: flex; flex-direction: column; gap: 8px; margin: 14px auto; padding: 14px; border: 1px solid #e3c4bd; border-radius: 8px; background: #fff8f6; }
+.vditor-fallback small { color: var(--color-text-muted); }
+.vditor-fallback textarea { width: 100%; min-height: 360px; resize: vertical; border: 1px solid var(--color-border); border-radius: 6px; padding: 12px; font: 14px/1.7 var(--font-code); }
+.hs-embed-host { margin: 14px 0 22px !important; padding: 0 !important; border: 0 !important; background: transparent !important; white-space: normal !important; }
+.hs-embed-host > code.language-hyperspace { display: none !important; }
+.hs-embed-card { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 12px; margin: 0; padding: 12px 14px; border: 1px solid #dfe1e5; border-radius: 8px; background: #fff; color: #333336; cursor: pointer; font: inherit; text-align: left; }
+.hs-embed-card:hover { border-color: #bfc8d2; background: #fbfcfd; }
+.hs-embed-card__icon { width: 38px; height: 38px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 6px; background: #fae9e6; color: #aa4d43; font-size: 9px; font-weight: 800; }
+.hs-embed-card--folder .hs-embed-card__icon { background: #eee4cf; color: #866d3a; }
+.hs-embed-card__copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
+.hs-embed-card__copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.hs-embed-card__copy small { color: var(--color-text-muted); font-size: 10px; }
+.hs-embed-card__action { color: var(--color-accent); font-size: 10px; }
+.hs-embed-card--error { flex-direction: column; align-items: flex-start; cursor: default; border-color: #e3c4bd; background: #fff8f6; }
+.hs-embed-card__source { width: 100%; margin-top: 6px; color: var(--color-text-muted); font-size: 11px; }
+.hs-embed-card__source pre { margin: 8px 0 0; padding: 8px; border-radius: 6px; background: #fff; color: #5c5650; font: 11px/1.5 var(--font-code); white-space: pre-wrap; }
+.outline-list button { height: auto; min-height: 30px; }
 
 .details-panel { min-width: 0; height: 100%; padding: 18px 15px; border-left: 1px solid var(--color-border); background: #faf9f6; overflow-y: auto; }
 .details-header { display: flex; align-items: center; margin-bottom: 18px; font-size: 12px; }
@@ -692,7 +672,7 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
   .app-shell { --sidebar-width: min(240px, 34vw) !important; }
   .workspace-content.with-details { grid-template-columns: minmax(0, 1fr); }
   .details-panel { position: absolute; z-index: 20; top: calc(var(--titlebar-height) + var(--workspace-tabbar-height)); right: var(--activity-rail-width); bottom: calc(var(--statusbar-height) + var(--bottom-tabs-height) + var(--secondary-bottom-panel-height, 0px)); width: min(300px, calc(100vw - 80px)); box-shadow: -8px 0 24px rgba(45, 38, 29, .1); }
-  .note-page { width: calc(100% - 48px); }
+  .editor { --editor-gutter: 18px; }
 }
 
 @media (max-width: 720px) {

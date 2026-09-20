@@ -1,7 +1,4 @@
-use crate::{
-    project_settings::ResolvedGitToolchain,
-    workspace_store::write_atomic,
-};
+use crate::{project_settings::ResolvedGitToolchain, workspace_store::write_atomic};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -95,9 +92,14 @@ fn successful_output(
 }
 
 pub fn git_available(toolchain: &ResolvedGitToolchain, project_path: &Path) -> bool {
-    run(toolchain, &toolchain.git_program, &["--version"], project_path)
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    run(
+        toolchain,
+        &toolchain.git_program,
+        &["--version"],
+        project_path,
+    )
+    .map(|output| output.status.success())
+    .unwrap_or(false)
 }
 
 pub fn lfs_available(toolchain: &ResolvedGitToolchain, project_path: &Path) -> bool {
@@ -208,10 +210,7 @@ fn history(toolchain: &ResolvedGitToolchain, project_path: &Path) -> Vec<GitComm
         .collect()
 }
 
-pub fn repository_info(
-    toolchain: &ResolvedGitToolchain,
-    project_path: &Path,
-) -> GitRepositoryInfo {
+pub fn repository_info(toolchain: &ResolvedGitToolchain, project_path: &Path) -> GitRepositoryInfo {
     let has_git = git_available(toolchain, project_path);
     let is_repository = project_path.join(".git").exists();
     if !has_git || !is_repository {
@@ -272,7 +271,12 @@ pub fn commit_all(
     if !project_path.join(".git").exists() {
         return Err("当前项目尚未启用 Git".into());
     }
-    successful_output(toolchain, &toolchain.git_program, &["add", "-A"], project_path)?;
+    successful_output(
+        toolchain,
+        &toolchain.git_program,
+        &["add", "-A"],
+        project_path,
+    )?;
     successful_output(
         toolchain,
         &toolchain.git_program,
@@ -411,8 +415,7 @@ mod tests {
     #[test]
     fn imported_pdf_is_materialized_in_worktree_and_staged_as_lfs_pointer() {
         let toolchain = ResolvedGitToolchain::system();
-        if !git_available(&toolchain, Path::new("."))
-            || !lfs_available(&toolchain, Path::new("."))
+        if !git_available(&toolchain, Path::new(".")) || !lfs_available(&toolchain, Path::new("."))
         {
             return;
         }

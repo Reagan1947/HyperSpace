@@ -19,6 +19,8 @@ export interface ContentNode {
   markerColor?: MarkerColor;
   tagIds?: string[];
   localPath?: string;
+  /** Stable filesystem identity used to retain metadata across external renames. */
+  fileIdentity?: string;
   contentHash?: string;
   lfsTracked?: boolean;
 }
@@ -47,9 +49,10 @@ export interface NoteBlock {
 export interface WorkspaceState {
   nodes: ContentNode[];
   tags?: TagDefinition[];
-  blocks: Record<string, NoteBlock[]>;
-  editorDocuments?: Record<string, unknown[]>;
-  noteMarkdown?: Record<string, string>;
+  /** Legacy import input only. Markdown is the writable note body after Vditor migration. */
+  blocks?: Record<string, NoteBlock[]>;
+  /** Canonical note body. Sidecars store formatVersion alongside this Markdown. */
+  noteMarkdown: Record<string, string>;
   selectedNodeId: string;
   lastSavedAt?: string;
 }

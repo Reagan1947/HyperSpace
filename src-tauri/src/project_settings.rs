@@ -287,8 +287,8 @@ pub fn save(
         set_private_permissions(&config_path)?;
     }
 
-    let payload = serde_json::to_string_pretty(&request.settings)
-        .map_err(|error| error.to_string())?;
+    let payload =
+        serde_json::to_string_pretty(&request.settings).map_err(|error| error.to_string())?;
     write_atomic(&settings_path(project_path), &format!("{payload}\n"))?;
     snapshot(app, project_path)
 }
@@ -398,7 +398,10 @@ pub fn resolve_git_toolchain(
         ),
     };
     let managed_lfs_directory = if settings.lfs_source == ToolSource::Managed {
-        lfs_program.as_ref().and_then(|path| path.parent()).map(Path::to_path_buf)
+        lfs_program
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
     } else {
         None
     };
