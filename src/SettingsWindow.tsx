@@ -4,7 +4,9 @@ import { Check, ChevronDown, ChevronRight, Minus, Pencil, Plus, Search, Trash2, 
 import {
   DEFAULT_APP_SETTINGS,
   getAppSettings,
+  hiddenEntryNameError,
   listSystemFonts,
+  normalizeHiddenEntryName,
   saveAppSettings,
   terminalCssFontFamily,
   type AppSettings,
@@ -24,7 +26,7 @@ import {
   type WorkspaceTagsSnapshot,
 } from "./workspaceTags";
 
-type SettingsPaneId = "terminal" | "tags";
+type SettingsPaneId = "terminal" | "files" | "tags";
 type SettingsGroupId = "appearance" | "workspace";
 
 type SettingsPane = {
@@ -54,6 +56,12 @@ const SETTINGS_PANES: Record<SettingsPaneId, SettingsPane> = {
     description: "新建、重命名与删除",
     keywords: ["tag", "tags", "标签", "标签管理", "rename", "重命名"],
   },
+  files: {
+    id: "files",
+    title: "文件树",
+    description: "隐藏文件与文件夹",
+    keywords: ["files", "file tree", "文件树", "隐藏", "hidden", "dotfile", "排除", "exclude", ".gitignore", ".github"],
+  },
 };
 
 const SETTINGS_GROUPS: SettingsGroup[] = [
@@ -67,7 +75,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     id: "workspace",
     title: "项目",
     keywords: ["project", "workspace", "项目", "工作区"],
-    panes: [SETTINGS_PANES.tags],
+    panes: [SETTINGS_PANES.files, SETTINGS_PANES.tags],
   },
 ];
 
@@ -80,7 +88,9 @@ function isTauri() {
 }
 
 function initialPane(): SettingsPaneId {
-  return new URLSearchParams(window.location.search).get("section") === "tags" ? "tags" : "terminal";
+  const section = new URLSearchParams(window.location.search).get("section");
+  if (section === "tags" || section === "files" || section === "terminal") return section;
+  return "terminal";
 }
 
 async function closeWindow() {
@@ -126,6 +136,7 @@ export function SettingsWindow() {
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [tagError, setTagError] = useState<string | null>(null);
+  const [newHiddenName, setNewHiddenName] = useState("");
 
   const normalizedQuery = query.trim().toLowerCase();
   const visibleGroups = useMemo(
@@ -223,7 +234,7 @@ export function SettingsWindow() {
     void import("@tauri-apps/api/event").then(async ({ emit, listen }) => {
       if (disposed) return;
       const stopNavigate = await listen<string>(SETTINGS_NAVIGATE_EVENT, (event) => {
-        if (event.payload === "tags" || event.payload === "terminal") {
+        if (event.payload === "tags" || event.payload === "terminal" || event.payload === "files") {
           const paneId = event.payload;
           setActivePane(paneId);
           setOpenGroups((current) => ({ ...current, [paneGroupId(paneId)]: true }));
@@ -275,6 +286,33 @@ export function SettingsWindow() {
     void persist({
       ...settings,
       terminal: { ...settings.terminal, ...patch },
+    });
+  };
+
+  const updateFiles = (patch: Partial<AppSettings["files"]>) => {
+    void persist({
+      ...settings,
+      files: { ...DEFAULT_APP_SETTINGS.files, ...settings.files, ...patch },
+    });
+  };
+
+  const addVisibleHiddenEntry = () => {
+    const errorMessage = hiddenEntryNameError(newHiddenName, settings.files?.visibleHiddenEntries ?? []);
+    if (errorMessage) {
+      setError(errorMessage);
+      return;
+    }
+    const name = normalizeHiddenEntryName(newHiddenName);
+    if (!name) return;
+    setNewHiddenName("");
+    updateFiles({
+      visibleHiddenEntries: [...(settings.files?.visibleHiddenEntries ?? []), name],
+    });
+  };
+
+  const removeVisibleHiddenEntry = (name: string) => {
+    updateFiles({
+      visibleHiddenEntries: (settings.files?.visibleHiddenEntries ?? []).filter((item) => item !== name),
     });
   };
 
@@ -357,6 +395,12 @@ export function SettingsWindow() {
   const monospaceFonts = fontOptions.filter((font) => font.monospace);
   const otherFonts = fontOptions.filter((font) => !font.monospace);
   const previewFamily = terminalCssFontFamily(settings.terminal.fontFamily);
+  const filesSettings = {
+    ...DEFAULT_APP_SETTINGS.files,
+    ...settings.files,
+    excludeHidden: settings.files?.excludeHidden ?? true,
+    visibleHiddenEntries: settings.files?.visibleHiddenEntries ?? [],
+  };
   const paneVisible = visiblePanes.some((pane) => pane.id === activePane);
   const footerError = activePane === "tags" ? tagError : error;
   const footerMessage = activePane === "tags"
@@ -372,7 +416,7 @@ export function SettingsWindow() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索设置"
-            autoFocus={activePane !== "tags"}
+            autoFocus={activePane !== "tags" && activePane !== "files"}
             spellCheck={false}
           />
         </label>
@@ -500,6 +544,84 @@ export function SettingsWindow() {
 README.md    src    src-tauri
 ~/HyperSpace $ echo "AaBb 0123 终端字体"`}
               </pre>
+            </div>
+          </>
+        ) : activePane === "files" && paneVisible ? (
+          <>
+            <header className="settings-pane-header">
+              <h2>文件树</h2>
+              <p>默认排除以点开头的隐藏文件和文件夹。你可以指定仍要显示的名称，例如 .gitignore 或 .github。</p>
+            </header>
+
+            <div className="settings-group">
+              <div className="settings-toggle-row">
+                <div>
+                  <strong>排除隐藏文件和文件夹</strong>
+                  <p>开启后，文件树不显示隐藏项。.assets 始终可见，.hyperspace 始终隐藏。</p>
+                </div>
+                <button
+                  type="button"
+                  className={`settings-switch ${filesSettings.excludeHidden ? "on" : ""}`}
+                  role="switch"
+                  aria-checked={filesSettings.excludeHidden}
+                  aria-label="排除隐藏文件和文件夹"
+                  onClick={() => updateFiles({ excludeHidden: !filesSettings.excludeHidden })}
+                >
+                  <span />
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-hidden-section">
+              <div className="settings-hidden-heading">
+                <h3>仍要展示的隐藏项</h3>
+                <p>按文件或文件夹名称匹配。关闭排除后，普通隐藏项会全部显示；此列表仍可用于显示 .git 等默认忽略的隐藏目录。</p>
+              </div>
+
+              <form
+                className="settings-tag-create"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  addVisibleHiddenEntry();
+                }}
+              >
+                <input
+                  value={newHiddenName}
+                  placeholder="例如 .gitignore 或 .github"
+                  aria-label="要显示的隐藏文件或文件夹"
+                  autoFocus={activePane === "files"}
+                  spellCheck={false}
+                  onChange={(event) => {
+                    setNewHiddenName(event.target.value);
+                    if (error) setError(null);
+                  }}
+                />
+                <button type="submit" disabled={!normalizeHiddenEntryName(newHiddenName)}>
+                  <Plus size={13} />
+                  添加
+                </button>
+              </form>
+
+              {filesSettings.visibleHiddenEntries.length === 0 ? (
+                <div className="settings-tag-empty">还没有例外。添加后，这些隐藏文件或文件夹会显示在文件树中。</div>
+              ) : (
+                <div className="settings-tag-list" role="list" aria-label="仍要展示的隐藏项">
+                  {filesSettings.visibleHiddenEntries.map((name) => (
+                    <div key={name} className="settings-tag-row" role="listitem">
+                      <span className="settings-tag-name" title={name}>{name}</span>
+                      <button
+                        type="button"
+                        className="danger"
+                        aria-label={`停止显示 ${name}`}
+                        title="移除"
+                        onClick={() => removeVisibleHiddenEntry(name)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         ) : activePane === "tags" && paneVisible ? (

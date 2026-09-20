@@ -25,6 +25,14 @@ export interface ContentNode {
   lfsTracked?: boolean;
 }
 
+export interface MarkdownBookmark {
+  id: string;
+  pageId: string;
+  line: number;
+  label: string;
+  createdAt: string;
+}
+
 export type BlockKind =
   | "text"
   | "heading1"
@@ -48,6 +56,7 @@ export interface NoteBlock {
 
 export interface WorkspaceState {
   nodes: ContentNode[];
+  bookmarks?: MarkdownBookmark[];
   tags?: TagDefinition[];
   /** Legacy import input only. Markdown is the writable note body after Vditor migration. */
   blocks?: Record<string, NoteBlock[]>;

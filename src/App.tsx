@@ -63,7 +63,7 @@ import {
   type GitRepositoryInfo,
   type WorkspaceSearchResult,
 } from "./storage";
-import type { ContentNode, MarkerColor, TagDefinition, WorkspaceState } from "./types";
+import type { ContentNode, MarkdownBookmark, MarkerColor, TagDefinition, WorkspaceState } from "./types";
 import {
   dirtyMarkdownNodeIds,
   markdownEquals,
@@ -338,10 +338,12 @@ function ProjectSidebar({
   );
 }
 
-function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRefreshGit, onSelectNode, onSelectHeading, onClose }: {
+function ToolSidebar({ tool, outlineItems, bookmarks, markdownBookmarks, nodes, gitInfo, gitLoading, onRefreshGit, onSelectNode, onSelectHeading, onClose }: {
   tool: Exclude<PrimaryLeftTool, "project"> | SecondaryLeftTool;
   outlineItems: { id: string; content: string; level: number }[];
   bookmarks: ContentNode[];
+  markdownBookmarks: MarkdownBookmark[];
+  nodes: ContentNode[];
   gitInfo?: GitRepositoryInfo;
   gitLoading?: boolean;
   onRefreshGit?: () => void;
@@ -358,7 +360,7 @@ function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRef
         : { title: "Bookmarks", icon: <Bookmark size={18} strokeWidth={1.7} />, emptyIcon: <Bookmark size={24} strokeWidth={1.5} />, empty: "暂无书签" };
 
   const hasStructure = tool === "structure" && outlineItems.length > 0;
-  const hasBookmarks = tool === "bookmarks" && bookmarks.length > 0;
+  const hasBookmarks = tool === "bookmarks" && (bookmarks.length > 0 || markdownBookmarks.length > 0);
   const isCommit = tool === "commit";
   const panePosition = tool === "structure" || tool === "bookmarks" ? "secondary" : "primary";
   return (
@@ -405,6 +407,17 @@ function ToolSidebar({ tool, outlineItems, bookmarks, gitInfo, gitLoading, onRef
       ) : hasBookmarks ? (
         <div className="sidebar-tool-list">
           {bookmarks.map((node) => <button key={node.id} onClick={() => onSelectNode(node.id)}><NodeIcon node={node} size={15} /><span>{node.title}</span></button>)}
+          {markdownBookmarks.map((bookmark) => {
+            const page = nodes.find((node) => node.id === bookmark.pageId);
+            if (!page) return null;
+            return (
+              <button key={bookmark.id} onClick={() => onSelectNode(bookmark.pageId)} title={`${page.title} · 第 ${bookmark.line} 行`}>
+                <Bookmark size={14} fill="#f4af3d" color="#f4af3d" />
+                <span>{bookmark.label}</span>
+                <small>第 {bookmark.line} 行</small>
+              </button>
+            );
+          })}
         </div>
       ) : (
         <div className="git-sidebar-content">
@@ -477,6 +490,8 @@ function NoteView({
   workspace,
   readOnly,
   onMarkdownChange,
+  bookmarks,
+  onToggleBookmark,
   onNavigateNode,
   onActiveHeadingChange,
   onCursorChange,
@@ -485,6 +500,8 @@ function NoteView({
   workspace: WorkspaceState;
   readOnly: boolean;
   onMarkdownChange: (markdown: string) => void;
+  bookmarks: MarkdownBookmark[];
+  onToggleBookmark: (line: number, label: string) => void;
   onNavigateNode: (nodeId: string) => void;
   onActiveHeadingChange?: (headingId: string | null) => void;
   onCursorChange?: (position: { line: number; column: number }) => void;
@@ -496,10 +513,12 @@ function NoteView({
           key={node.id}
           pageId={node.id}
           nodes={workspace.nodes}
+          bookmarks={bookmarks}
           value={workspace.noteMarkdown[node.id] ?? ""}
           readOnly={readOnly}
           onChange={onMarkdownChange}
           onNavigateNode={onNavigateNode}
+          onToggleBookmark={onToggleBookmark}
           onActiveHeadingChange={onActiveHeadingChange}
           onCursorChange={onCursorChange}
         />
@@ -518,6 +537,142 @@ function EmptyView({ node }: { node: ContentNode }) {
         <small>{node.lfsTracked ? "Git LFS 已跟踪" : "本地文件（未启用 Git LFS）"}</small>
       )}
       <button><Plus size={16} /> 新建内容</button>
+    </div>
+  );
+}
+
+const modifierKey = /Mac|iPhone|iPad/.test(navigator.platform) || /Mac/.test(navigator.userAgent) ? "⌘" : "Ctrl";
+
+const EMPTY_CANVAS_SHORTCUTS = [
+  { id: "open-folder", label: "Open Folder", keys: [modifierKey, "O"] },
+  { id: "search", label: "Search", keys: [modifierKey, "K"] },
+  { id: "settings", label: "Settings", keys: [modifierKey, ","] },
+] as const;
+
+function droppedFileNames(paths: string[]) {
+  return paths.flatMap((path) => {
+    const normalized = path.replace(/\\/g, "/").trim();
+    if (!normalized || normalized.startsWith("#")) return [];
+    const fileName = decodeURIComponent(normalized.split("/").pop() ?? "");
+    return fileName ? [{ path: normalized, fileName }] : [];
+  });
+}
+
+function nodeMatchesDroppedFile(node: ContentNode, path: string, fileName: string) {
+  if (!opensInWorkspace(node)) return false;
+  if (node.title === fileName || node.title === fileName.replace(/\.[^.]+$/, "")) return true;
+  const localPath = node.localPath?.replace(/\\/g, "/");
+  return Boolean(localPath && (path === localPath || path.endsWith(`/${localPath}`)));
+}
+
+function BlankWorkspace({
+  nodes,
+  onOpenNode,
+  onOpenFolder,
+  onOpenSearch,
+}: {
+  nodes: ContentNode[];
+  onOpenNode: (id: string) => void;
+  onOpenFolder: () => void;
+  onOpenSearch: () => void;
+}) {
+  const [dropActive, setDropActive] = useState(false);
+  const dropDepth = useRef(0);
+  const nodesRef = useRef(nodes);
+  const onOpenNodeRef = useRef(onOpenNode);
+  nodesRef.current = nodes;
+  onOpenNodeRef.current = onOpenNode;
+
+  function openDroppedPaths(paths: string[]) {
+    for (const { path, fileName } of droppedFileNames(paths)) {
+      const node = nodesRef.current.find((item) => nodeMatchesDroppedFile(item, path, fileName));
+      if (node) onOpenNodeRef.current(node.id);
+    }
+  }
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
+      if (disposed) return;
+      return getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setDropActive(true);
+        } else if (event.payload.type === "leave") {
+          setDropActive(false);
+        } else if (event.payload.type === "drop") {
+          setDropActive(false);
+          openDroppedPaths(event.payload.paths);
+        }
+      }).then((stop) => {
+        if (disposed) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      });
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  return (
+    <div
+      className={`blank-workspace ${dropActive ? "is-drop-target" : ""}`}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        dropDepth.current += 1;
+        setDropActive(true);
+      }}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={() => {
+        dropDepth.current = Math.max(0, dropDepth.current - 1);
+        if (dropDepth.current === 0) setDropActive(false);
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        dropDepth.current = 0;
+        setDropActive(false);
+        const uriList = event.dataTransfer.getData("text/uri-list") || event.dataTransfer.getData("text/plain");
+        const paths = [
+          ...Array.from(event.dataTransfer.files, (file) => file.name),
+          ...uriList.split("\n"),
+        ];
+        openDroppedPaths(paths);
+      }}
+    >
+      <div className="blank-workspace-copy">
+        <ul className="blank-workspace-shortcuts">
+          {EMPTY_CANVAS_SHORTCUTS.map((shortcut) => {
+            const action = shortcut.id === "open-folder"
+              ? onOpenFolder
+              : shortcut.id === "search" ? onOpenSearch : undefined;
+            const content = (
+              <>
+                <span>{shortcut.label}</span>
+                <span className="blank-workspace-keys">
+                  {shortcut.keys.map((key) => <kbd key={key}>{key}</kbd>)}
+                </span>
+              </>
+            );
+            return (
+              <li key={shortcut.id}>
+                {action ? <button type="button" onClick={action}>{content}</button> : <div>{content}</div>}
+              </li>
+            );
+          })}
+        </ul>
+        <p className="blank-workspace-drop">Drop file here to view theme</p>
+      </div>
     </div>
   );
 }
@@ -786,6 +941,14 @@ function PathBreadcrumbs({
 
   const segments = useMemo<BreadcrumbSegment[]>(() => {
     const rootNodes = nodes.filter((node) => node.parentId === null);
+    if (!selected.id) {
+      return [{
+        key: "root",
+        label: projectName,
+        siblings: rootNodes.map((node) => ({ id: node.id, label: node.title, kind: "node" })),
+      }];
+    }
+
     const kindLabel = selected.kind === "page" ? "笔记" : selected.kind === "folder" ? "文件夹" : "文件";
     const kindNodes = nodes.filter((node) => node.kind === selected.kind);
     const peerNodes = nodes.filter((node) => node.parentId === selected.parentId);
@@ -991,26 +1154,7 @@ function App() {
 
     void import("@tauri-apps/api/event").then(({ listen }) => {
       if (disposed) return;
-      return listen(OPEN_FOLDER_REQUESTED_EVENT, async () => {
-        const { message, open } = await import("@tauri-apps/plugin-dialog");
-        try {
-          const selectedPath = await open({
-            directory: true,
-            multiple: false,
-            title: "Open Folder",
-          });
-          if (typeof selectedPath !== "string" || !selectedPath) return;
-
-          const openedWorkspace = await openProject(selectedPath);
-          const fallbackWorkspace = createBlankWorkspace(projectNameFromPath(selectedPath));
-          handleProjectOpened(openedWorkspace ?? fallbackWorkspace, selectedPath);
-        } catch (error) {
-          await message(error instanceof Error ? error.message : String(error), {
-            title: "Unable to Open Folder",
-            kind: "error",
-          });
-        }
-      }).then((stop) => {
+      return listen(OPEN_FOLDER_REQUESTED_EVENT, () => { void openFolderDialog(); }).then((stop) => {
         if (disposed) {
           stop();
           return;
@@ -1023,6 +1167,18 @@ function App() {
       disposed = true;
       unlisten?.();
     };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== "k") return;
+      if ((event.target as HTMLElement | null)?.closest("input, textarea, select, [contenteditable='true']")) return;
+      event.preventDefault();
+      setBottomTool("search");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   useEffect(() => {
@@ -1202,22 +1358,14 @@ function App() {
     };
   }, [projectPath, query, workspace.lastSavedAt]);
 
-  const selected = (() => {
-    const byId = (id: string | undefined) => workspace.nodes.find((node) => node.id === id);
-    const current = byId(workspace.selectedNodeId);
-    if (opensInWorkspace(current)) return current;
-    for (let index = openTabIds.length - 1; index >= 0; index -= 1) {
-      const tab = byId(openTabIds[index]);
-      if (opensInWorkspace(tab)) return tab;
-    }
-    return workspace.nodes.find(opensInWorkspace)
-      ?? { id: "", parentId: null, kind: "folder" as const, title: projectNameFromPath(projectPath), updatedAt: "" };
-  })();
+  const selected = workspace.nodes.find((node) => node.id === workspace.selectedNodeId)
+    ?? { id: "", parentId: null, kind: "folder" as const, title: projectNameFromPath(projectPath), updatedAt: "" };
   const selectedReadOnly = lockedNodeIds.includes(selected.id);
   const projectName = projectNameFromPath(projectPath);
   const openTabs = openTabIds
     .map((id) => workspace.nodes.find((node) => node.id === id))
     .filter(opensInWorkspace);
+  const hasSelectedContent = opensInWorkspace(selected) && openTabs.some((tab) => tab.id === selected.id);
   const fallbackSearchResults = useMemo<WorkspaceSearchResult[]>(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return [];
@@ -1254,7 +1402,7 @@ function App() {
   }, [selected.id]);
 
   useEffect(() => {
-    const title = `${projectName} - ${selected.title}`;
+    const title = selected.id ? `${projectName} - ${selected.title}` : projectName;
     document.title = title;
     if (!("__TAURI_INTERNALS__" in window)) return;
     void import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
@@ -1305,10 +1453,11 @@ function App() {
 
   function selectNode(id: string) {
     const node = workspace.nodes.find((item) => item.id === id);
-    if (!opensInWorkspace(node)) {
+    if (!node || node.kind === "folder") {
       if (node?.kind === "folder") {
         setTreeSelectedId(id);
         setPrimaryLeftTool("project");
+        setWorkspace((current) => ({ ...current, selectedNodeId: id }));
       }
       return;
     }
@@ -1319,9 +1468,10 @@ function App() {
   function selectFromTree(id: string) {
     setTreeSelectedId(id);
     const node = workspace.nodes.find((item) => item.id === id);
-    if (!opensInWorkspace(node)) return;
     setWorkspace((current) => ({ ...current, selectedNodeId: id }));
-    setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
+    if (opensInWorkspace(node)) {
+      setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
+    }
   }
 
   function handleProjectCreated(nextWorkspace: WorkspaceState, nextProjectPath: string) {
@@ -1342,6 +1492,28 @@ function App() {
     setGitError(null);
     setCommitMessage("");
     setIndexedSearchResults(null);
+  }
+
+  async function openFolderDialog() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const { message, open } = await import("@tauri-apps/plugin-dialog");
+    try {
+      const selectedPath = await open({
+        directory: true,
+        multiple: false,
+        title: "Open Folder",
+      });
+      if (typeof selectedPath !== "string" || !selectedPath) return;
+
+      const openedWorkspace = await openProject(selectedPath);
+      const fallbackWorkspace = createBlankWorkspace(projectNameFromPath(selectedPath));
+      handleProjectOpened(openedWorkspace ?? fallbackWorkspace, selectedPath);
+    } catch (error) {
+      await message(error instanceof Error ? error.message : String(error), {
+        title: "Unable to Open Folder",
+        kind: "error",
+      });
+    }
   }
 
   async function refreshGitStatus() {
@@ -1422,8 +1594,7 @@ function App() {
     setOpenTabIds((current) => {
       const next = current.filter((tabId) => tabId !== id);
       if (workspace.selectedNodeId === id) {
-        const nextSelected = next.at(-1) ?? workspace.nodes[0]?.id;
-        if (nextSelected) setWorkspace((value) => ({ ...value, selectedNodeId: nextSelected }));
+        setWorkspace((value) => ({ ...value, selectedNodeId: next.at(-1) ?? treeSelectedId }));
       }
       return next;
     });
@@ -1459,6 +1630,24 @@ function App() {
     });
   }
 
+  function toggleMarkdownBookmark(pageId: string, line: number, label: string) {
+    setWorkspace((current) => {
+      const bookmarks = current.bookmarks ?? [];
+      const existing = bookmarks.find((bookmark) => bookmark.pageId === pageId && bookmark.line === line);
+      if (existing) {
+        return { ...current, bookmarks: bookmarks.filter((bookmark) => bookmark.id !== existing.id) };
+      }
+      const bookmark: MarkdownBookmark = {
+        id: crypto.randomUUID(),
+        pageId,
+        line,
+        label: label.replace(/^#{1,6}\s+/, "").slice(0, 80),
+        createdAt: new Date().toISOString(),
+      };
+      return { ...current, bookmarks: [...bookmarks, bookmark] };
+    });
+  }
+
   function createPage() {
     void createNode("page", parentIdForTreeTarget(workspace.nodes, treeSelectedId, selected));
   }
@@ -1482,7 +1671,7 @@ function App() {
         };
         setWorkspace((current) => ({
           ...current,
-          selectedNodeId: opensInWorkspace(node) ? node.id : current.selectedNodeId,
+          selectedNodeId: node.id,
           nodes: [...current.nodes, node],
           noteMarkdown: node.kind === "file" ? { ...current.noteMarkdown, [node.id]: "" } : current.noteMarkdown,
         }));
@@ -1514,7 +1703,7 @@ function App() {
     };
     setWorkspace((current) => ({
       ...current,
-      selectedNodeId: opensInWorkspace(node) ? id : current.selectedNodeId,
+      selectedNodeId: id,
       nodes: [...current.nodes, node],
       noteMarkdown: kind === "page" ? { ...current.noteMarkdown, [id]: "" } : current.noteMarkdown,
     }));
@@ -1701,7 +1890,8 @@ function App() {
       const remainingNodes = current.nodes.filter((node) => !allIds.has(node.id));
       const remainingMarkdown = Object.fromEntries(Object.entries(current.noteMarkdown).filter(([id]) => !allIds.has(id)));
       const selectedNodeId = allIds.has(current.selectedNodeId) ? remainingNodes[0]?.id ?? "" : current.selectedNodeId;
-      return { ...current, nodes: remainingNodes, noteMarkdown: remainingMarkdown, selectedNodeId };
+      const bookmarks = (current.bookmarks ?? []).filter((bookmark) => !allIds.has(bookmark.pageId));
+      return { ...current, nodes: remainingNodes, noteMarkdown: remainingMarkdown, bookmarks, selectedNodeId };
     });
     setOpenTabIds((current) => current.filter((id) => !allIds.has(id)));
     setTreeSelectedId((current) => allIds.has(current) ? remainingId : current);
@@ -1716,7 +1906,7 @@ function App() {
     } as React.CSSProperties}>
       <header className="window-titlebar" aria-label="窗口标题栏">
         <div className="titlebar-main" data-tauri-drag-region>
-          <strong data-tauri-drag-region title={projectPath ?? projectName}>{projectName} - {selected.title}</strong>
+          <strong data-tauri-drag-region title={projectPath ?? projectName}>{selected.id ? `${projectName} - ${selected.title}` : projectName}</strong>
         </div>
         <div className="ide-toolbar">
           <PathBreadcrumbs
@@ -1774,6 +1964,8 @@ function App() {
               tool={primaryLeftTool}
               outlineItems={outlineItems}
               bookmarks={workspace.nodes.filter((node) => node.favorite)}
+              markdownBookmarks={workspace.bookmarks ?? []}
+              nodes={workspace.nodes}
               gitInfo={gitInfo}
               gitLoading={gitLoading}
               onRefreshGit={() => void refreshGitStatus()}
@@ -1790,6 +1982,8 @@ function App() {
               tool={secondaryLeftTool}
               outlineItems={outlineItems}
               bookmarks={workspace.nodes.filter((node) => node.favorite)}
+              markdownBookmarks={workspace.bookmarks ?? []}
+              nodes={workspace.nodes}
               onSelectNode={selectNode}
               onSelectHeading={(headingId) => {
                 setActiveBlockId(headingId);
@@ -1805,7 +1999,7 @@ function App() {
       <main className="workspace">
         <WorkspaceTabBar
           tabs={openTabs}
-          activeId={selected.id}
+          activeId={hasSelectedContent ? selected.id : ""}
           onSelect={selectNode}
           onClose={closeTab}
           onOpenInfo={() => toggleRightTool("notifications")}
@@ -1813,19 +2007,28 @@ function App() {
 
         <div className={`workspace-content ${rightTool ? "with-details" : ""}`}>
           <section className="workspace-canvas" role="tabpanel" onContextMenu={(event) => event.preventDefault()}>
-            {openTabs.length === 0 ? (
-              <div className="blank-workspace"><FileText size={34} /><p>从项目列表中选择一个页面</p></div>
-            ) : isMarkdownDocument(selected) ? (
+            {hasSelectedContent ? (
+              isMarkdownDocument(selected) ? (
               <NoteView
                 node={selected}
                 workspace={workspace}
                 readOnly={selectedReadOnly}
+                bookmarks={(workspace.bookmarks ?? []).filter((bookmark) => bookmark.pageId === selected.id)}
+                onToggleBookmark={(line, label) => toggleMarkdownBookmark(selected.id, line, label)}
                 onMarkdownChange={(markdown) => { if (!selectedReadOnly) updateDocument(selected.id, markdown); }}
                 onNavigateNode={selectNode}
                 onActiveHeadingChange={setActiveBlockId}
                 onCursorChange={setCursorPosition}
               />
-            ) : <EmptyView node={selected} />}
+            ) : <EmptyView node={selected} />
+            ) : (
+              <BlankWorkspace
+                nodes={workspace.nodes}
+                onOpenNode={selectNode}
+                onOpenFolder={() => { void openFolderDialog(); }}
+                onOpenSearch={() => setBottomTool("search")}
+              />
+            )}
           </section>
 
           {rightTool && (

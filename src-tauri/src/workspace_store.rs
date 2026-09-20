@@ -29,6 +29,33 @@ const IGNORED_DIRECTORY_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    pub exclude_hidden: bool,
+    pub visible_hidden_entries: HashSet<String>,
+}
+
+impl ScanOptions {
+    pub fn new(
+        exclude_hidden: bool,
+        visible_hidden_entries: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            exclude_hidden,
+            visible_hidden_entries: visible_hidden_entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            exclude_hidden: true,
+            visible_hidden_entries: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -231,6 +258,7 @@ fn scan_directory(
     existing_by_path: &HashMap<String, Value>,
     existing_by_identity: &HashMap<String, Value>,
     nodes: &mut Vec<Value>,
+    options: &ScanOptions,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(directory)
         .map_err(|error| format!("Failed to read {}: {error}", directory.display()))?
@@ -252,7 +280,7 @@ fn scan_directory(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if should_skip_entry(&name, file_type.is_dir()) {
+        if should_skip_entry(&name, file_type.is_dir(), options) {
             continue;
         }
         let path = entry.path();
@@ -319,6 +347,7 @@ fn scan_directory(
                 existing_by_path,
                 existing_by_identity,
                 nodes,
+                options,
             )?;
         }
     }
@@ -329,13 +358,17 @@ fn is_allowed_hidden_directory(name: &str) -> bool {
     name == ASSETS_DIRECTORY_NAME
 }
 
-fn should_skip_entry(name: &str, is_dir: bool) -> bool {
-    if is_dir && is_allowed_hidden_directory(name) {
+fn should_skip_entry(name: &str, is_dir: bool, options: &ScanOptions) -> bool {
+    if name.ends_with(".tmp") || name == PROJECT_DIR_NAME {
+        return true;
+    }
+    if is_allowed_hidden_directory(name) || options.visible_hidden_entries.contains(name) {
         return false;
     }
-    name.starts_with('.')
-        || name.ends_with(".tmp")
-        || (is_dir && IGNORED_DIRECTORY_NAMES.contains(&name))
+    if is_dir && IGNORED_DIRECTORY_NAMES.contains(&name) {
+        return true;
+    }
+    options.exclude_hidden && name.starts_with('.')
 }
 
 fn validate_entry_name(name: &str, is_dir: bool) -> Result<(), String> {
@@ -354,6 +387,14 @@ fn validate_entry_name(name: &str, is_dir: bool) -> Result<(), String> {
 }
 
 pub fn is_ignored_fs_event(project_path: &Path, path: &Path) -> bool {
+    is_ignored_fs_event_with_options(project_path, path, &ScanOptions::default())
+}
+
+pub fn is_ignored_fs_event_with_options(
+    project_path: &Path,
+    path: &Path,
+    options: &ScanOptions,
+) -> bool {
     let Ok(relative) = path.strip_prefix(project_path) else {
         return true;
     };
@@ -362,11 +403,18 @@ pub fn is_ignored_fs_event(project_path: &Path, path: &Path) -> bool {
     }
     relative.components().any(|component| {
         let name = component.as_os_str().to_string_lossy();
-        should_skip_entry(&name, true)
+        should_skip_entry(&name, true, options)
     })
 }
 
 pub fn scan_project_workspace(project_path: &Path) -> Result<Value, String> {
+    scan_project_workspace_with_options(project_path, &ScanOptions::default())
+}
+
+pub fn scan_project_workspace_with_options(
+    project_path: &Path,
+    options: &ScanOptions,
+) -> Result<Value, String> {
     let loaded = load_project_workspace(project_path)?;
     let mut workspace = loaded
         .as_deref()
@@ -412,6 +460,7 @@ pub fn scan_project_workspace(project_path: &Path) -> Result<Value, String> {
         &existing_by_path,
         &existing_by_identity,
         &mut scanned_nodes,
+        options,
     )?;
     let first_node_id = {
         let nodes = workspace
@@ -495,7 +544,14 @@ pub fn scan_project_workspace(project_path: &Path) -> Result<Value, String> {
 }
 
 pub fn open_project_workspace(project_path: &Path) -> Result<Option<String>, String> {
-    let workspace = scan_project_workspace(project_path)?;
+    open_project_workspace_with_options(project_path, &ScanOptions::default())
+}
+
+pub fn open_project_workspace_with_options(
+    project_path: &Path,
+    options: &ScanOptions,
+) -> Result<Option<String>, String> {
+    let workspace = scan_project_workspace_with_options(project_path, options)?;
     let is_empty = workspace
         .get("nodes")
         .and_then(Value::as_array)
@@ -1828,6 +1884,83 @@ mod tests {
         assert_eq!(folder.kind, "folder");
         assert_eq!(folder.relative_path, "docs/新建文件夹");
         assert!(project.join("docs/新建文件夹").is_dir());
+
+        fs::remove_dir_all(project).expect("remove temp project");
+    }
+
+    #[test]
+    fn hidden_entries_follow_scan_options() {
+        let default = ScanOptions::default();
+        assert!(should_skip_entry(".env", false, &default));
+        assert!(should_skip_entry(".idea", true, &default));
+        assert!(should_skip_entry(".git", true, &default));
+        assert!(!should_skip_entry(".assets", true, &default));
+        assert!(!should_skip_entry("README.md", false, &default));
+
+        let allowlisted = ScanOptions::new(true, [".env", ".idea"]);
+        assert!(!should_skip_entry(".env", false, &allowlisted));
+        assert!(!should_skip_entry(".idea", true, &allowlisted));
+        assert!(should_skip_entry(".gitignore", false, &allowlisted));
+        assert!(should_skip_entry(".hyperspace", true, &allowlisted));
+
+        let show_hidden = ScanOptions::new(false, Vec::<String>::new());
+        assert!(!should_skip_entry(".env", false, &show_hidden));
+        assert!(!should_skip_entry(".idea", true, &show_hidden));
+        assert!(should_skip_entry(".hyperspace", true, &show_hidden));
+        assert!(should_skip_entry("node_modules", true, &show_hidden));
+        assert!(should_skip_entry(".git", true, &show_hidden));
+
+        let allow_git = ScanOptions::new(true, [".git"]);
+        assert!(!should_skip_entry(".git", true, &allow_git));
+        assert!(should_skip_entry(".env", false, &allow_git));
+    }
+
+    #[test]
+    fn scan_can_show_allowlisted_hidden_files_and_folders() {
+        let project = test_directory("visible-hidden");
+        fs::create_dir_all(project.join(".github/workflows")).expect("create hidden tree");
+        fs::create_dir_all(project.join(".idea")).expect("create ignored hidden directory");
+        fs::write(project.join(".gitignore"), "target").expect("write gitignore");
+        fs::write(project.join(".env"), "SECRET=1").expect("write env");
+        fs::write(project.join(".github/workflows/ci.yml"), "name: ci").expect("write workflow");
+        fs::write(project.join("README.md"), "hello").expect("write readme");
+
+        let default_workspace = scan_project_workspace(&project).expect("default scan");
+        let default_paths = default_workspace["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .filter_map(|node| node.get("localPath").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+        assert!(default_paths.contains("README.md"));
+        assert!(!default_paths.contains(".gitignore"));
+        assert!(!default_paths.contains(".env"));
+        assert!(!default_paths.iter().any(|path| path.starts_with(".github")));
+
+        let options = ScanOptions::new(true, [".gitignore", ".github"]);
+        let workspace = scan_project_workspace_with_options(&project, &options).expect("scan");
+        let paths = workspace["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .filter_map(|node| node.get("localPath").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+        assert!(paths.contains("README.md"));
+        assert!(paths.contains(".gitignore"));
+        assert!(paths.contains(".github"));
+        assert!(paths.contains(".github/workflows/ci.yml"));
+        assert!(!paths.contains(".env"));
+        assert!(!paths.iter().any(|path| path.starts_with(".idea")));
+        assert!(!is_ignored_fs_event_with_options(
+            &project,
+            &project.join(".gitignore"),
+            &options
+        ));
+        assert!(is_ignored_fs_event_with_options(
+            &project,
+            &project.join(".env"),
+            &options
+        ));
 
         fs::remove_dir_all(project).expect("remove temp project");
     }

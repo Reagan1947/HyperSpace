@@ -8,7 +8,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::workspace_store;
+use crate::{app_settings, workspace_store};
 
 pub const WORKSPACE_TREE_CHANGED_EVENT: &str = "workspace-tree-changed";
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -110,10 +110,10 @@ fn handle_watch_events(app: &AppHandle, result: DebounceEventResult) {
     let Some(project) = inner.project_path.clone() else {
         return;
     };
-    if events
-        .iter()
-        .all(|event| workspace_store::is_ignored_fs_event(&project, &event.path))
-    {
+    let options = app_settings::scan_options(app);
+    if events.iter().all(|event| {
+        workspace_store::is_ignored_fs_event_with_options(&project, &event.path, &options)
+    }) {
         return;
     }
     if Instant::now() < inner.quiet_until {
@@ -125,8 +125,23 @@ fn handle_watch_events(app: &AppHandle, result: DebounceEventResult) {
     emit_workspace_tree(app, &project);
 }
 
+pub fn refresh_workspace_tree(app: &AppHandle) {
+    let Some(state) = app.try_state::<FsWatchState>() else {
+        return;
+    };
+    let Ok(inner) = state.inner.lock() else {
+        return;
+    };
+    let Some(project) = inner.project_path.clone() else {
+        return;
+    };
+    drop(inner);
+    emit_workspace_tree(app, &project);
+}
+
 fn emit_workspace_tree(app: &AppHandle, project: &Path) {
-    match workspace_store::scan_project_workspace(project) {
+    let options = app_settings::scan_options(app);
+    match workspace_store::scan_project_workspace_with_options(project, &options) {
         Ok(workspace) => {
             if let Err(error) = app.emit(WORKSPACE_TREE_CHANGED_EVENT, workspace) {
                 eprintln!("Failed to emit workspace tree change: {error}");

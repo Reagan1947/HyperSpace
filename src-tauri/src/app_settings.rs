@@ -1,4 +1,4 @@
-use crate::workspace_store::write_atomic;
+use crate::workspace_store::{write_atomic, ScanOptions};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::{AppHandle, Manager};
@@ -9,6 +9,9 @@ const DEFAULT_TERMINAL_FONT_FAMILY: &str = "JetBrains Mono";
 const DEFAULT_TERMINAL_FONT_SIZE: u32 = 12;
 const MIN_TERMINAL_FONT_SIZE: u32 = 8;
 const MAX_TERMINAL_FONT_SIZE: u32 = 32;
+const MAX_VISIBLE_HIDDEN_ENTRIES: usize = 200;
+const ALWAYS_HIDDEN_ENTRY: &str = ".hyperspace";
+const ALWAYS_VISIBLE_HIDDEN_ENTRY: &str = ".assets";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,11 +31,31 @@ impl Default for TerminalSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesSettings {
+    #[serde(default = "default_exclude_hidden")]
+    pub exclude_hidden: bool,
+    #[serde(default)]
+    pub visible_hidden_entries: Vec<String>,
+}
+
+impl Default for FilesSettings {
+    fn default() -> Self {
+        Self {
+            exclude_hidden: default_exclude_hidden(),
+            visible_hidden_entries: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     #[serde(default)]
     pub terminal: TerminalSettings,
+    #[serde(default)]
+    pub files: FilesSettings,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -48,6 +71,41 @@ fn default_terminal_font_family() -> String {
 
 fn default_terminal_font_size() -> u32 {
     DEFAULT_TERMINAL_FONT_SIZE
+}
+
+fn default_exclude_hidden() -> bool {
+    true
+}
+
+pub fn normalize_hidden_entry_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let name = if trimmed.starts_with('.') {
+        trimmed.to_string()
+    } else {
+        format!(".{trimmed}")
+    };
+    if name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name == ALWAYS_HIDDEN_ENTRY
+        || name == ALWAYS_VISIBLE_HIDDEN_ENTRY
+    {
+        return None;
+    }
+    Some(name)
+}
+
+pub fn scan_options(app: &AppHandle) -> ScanOptions {
+    let settings = load(app).unwrap_or_default();
+    ScanOptions::new(
+        settings.files.exclude_hidden,
+        settings.files.visible_hidden_entries,
+    )
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -70,6 +128,22 @@ pub fn normalize(mut settings: AppSettings) -> AppSettings {
         family.to_string()
     };
     settings.terminal.font_size = clamp_font_size(settings.terminal.font_size);
+
+    let mut visible = Vec::new();
+    for raw in settings.files.visible_hidden_entries {
+        let Some(name) = normalize_hidden_entry_name(&raw) else {
+            continue;
+        };
+        if visible.iter().any(|existing: &String| existing == &name) {
+            continue;
+        }
+        visible.push(name);
+        if visible.len() >= MAX_VISIBLE_HIDDEN_ENTRIES {
+            break;
+        }
+    }
+    visible.sort_by(|left, right| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
+    settings.files.visible_hidden_entries = visible;
     settings
 }
 
@@ -216,6 +290,7 @@ mod tests {
                 font_family: "  ".into(),
                 font_size: 3,
             },
+            ..AppSettings::default()
         });
         assert_eq!(settings.terminal.font_family, DEFAULT_TERMINAL_FONT_FAMILY);
         assert_eq!(settings.terminal.font_size, MIN_TERMINAL_FONT_SIZE);
@@ -225,9 +300,46 @@ mod tests {
                 font_family: "Menlo".into(),
                 font_size: 99,
             },
+            ..AppSettings::default()
         });
         assert_eq!(large.terminal.font_family, "Menlo");
         assert_eq!(large.terminal.font_size, MAX_TERMINAL_FONT_SIZE);
+    }
+
+    #[test]
+    fn normalize_hidden_entries_prefix_dedupes_and_drops_invalid() {
+        let settings = normalize(AppSettings {
+            files: FilesSettings {
+                exclude_hidden: true,
+                visible_hidden_entries: vec![
+                    " gitignore ".into(),
+                    ".github".into(),
+                    ".gitignore".into(),
+                    "../secret".into(),
+                    ".hyperspace".into(),
+                    ".assets".into(),
+                    "".into(),
+                ],
+            },
+            ..AppSettings::default()
+        });
+        assert_eq!(
+            settings.files.visible_hidden_entries,
+            vec![".github".to_string(), ".gitignore".to_string()]
+        );
+        assert!(settings.files.exclude_hidden);
+    }
+
+    #[test]
+    fn missing_files_settings_default_to_excluding_hidden() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"terminal":{"fontFamily":"Menlo","fontSize":14}}"#,
+        )
+        .expect("deserialize legacy settings");
+        let settings = normalize(settings);
+        assert!(settings.files.exclude_hidden);
+        assert!(settings.files.visible_hidden_entries.is_empty());
+        assert_eq!(settings.terminal.font_family, "Menlo");
     }
 
     #[test]

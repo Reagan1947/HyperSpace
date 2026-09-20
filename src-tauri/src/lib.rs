@@ -24,6 +24,7 @@ const MENU_NEW_PROJECT: &str = "new-project";
 const MENU_OPEN_FOLDER: &str = "open-folder";
 const MENU_SETTINGS: &str = "settings";
 const MENU_SETTINGS_TERMINAL: &str = "settings-terminal";
+const MENU_SETTINGS_FILES: &str = "settings-files";
 const MENU_SETTINGS_TAGS: &str = "settings-tags";
 const MENU_PROJECT_SETTINGS: &str = "project-settings";
 const OPEN_FOLDER_REQUESTED_EVENT: &str = "open-folder-requested";
@@ -78,7 +79,9 @@ fn write_current_project(app: &AppHandle, project_path: &Path) -> Result<(), Str
 #[tauri::command]
 fn load_workspace(app: AppHandle) -> Result<Option<String>, String> {
     if let Some(project_path) = read_current_project(&app)? {
-        let workspace = workspace_store::open_project_workspace(&project_path);
+        let options = app_settings::scan_options(&app);
+        let workspace =
+            workspace_store::open_project_workspace_with_options(&project_path, &options);
         if let Err(error) = fs_watch::start_watching(&app, &project_path) {
             eprintln!("Failed to watch project: {error}");
         }
@@ -134,7 +137,9 @@ fn open_project(app: AppHandle, path: String) -> Result<Option<String>, String> 
         return Err("所选路径不是有效的文件夹".into());
     }
 
-    let workspace = workspace_store::open_project_workspace(&project_path)?;
+    let options = app_settings::scan_options(&app);
+    let workspace =
+        workspace_store::open_project_workspace_with_options(&project_path, &options)?;
     write_current_project(&app, &project_path)?;
     if let Err(error) = fs_watch::start_watching(&app, &project_path) {
         eprintln!("Failed to watch project: {error}");
@@ -360,6 +365,7 @@ fn save_app_settings(
     let settings = app_settings::save(&app, settings)?;
     app.emit(app_settings::APP_SETTINGS_CHANGED_EVENT, &settings)
         .map_err(|error| error.to_string())?;
+    fs_watch::refresh_workspace_tree(&app);
     Ok(settings)
 }
 
@@ -484,6 +490,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
 
     let settings_submenu = SubmenuBuilder::new(app, "Settings")
         .text(MENU_SETTINGS_TERMINAL, "Terminal Font")
+        .text(MENU_SETTINGS_FILES, "文件树")
         .text(MENU_SETTINGS_TAGS, "标签管理")
         .build()?;
 
@@ -530,10 +537,12 @@ pub fn run() {
                     }
                 } else if event.id().as_ref() == MENU_SETTINGS
                     || event.id().as_ref() == MENU_SETTINGS_TERMINAL
+                    || event.id().as_ref() == MENU_SETTINGS_FILES
                     || event.id().as_ref() == MENU_SETTINGS_TAGS
                 {
                     let section = match event.id().as_ref() {
                         MENU_SETTINGS_TERMINAL => Some("terminal"),
+                        MENU_SETTINGS_FILES => Some("files"),
                         MENU_SETTINGS_TAGS => Some("tags"),
                         _ => None,
                     };

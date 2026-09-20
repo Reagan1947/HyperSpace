@@ -9,19 +9,22 @@ import {
 } from "./hyperspaceEmbeds";
 import {
   annotateHeadingElements,
+  headingLabelFromElement,
   parseMarkdownHeadings,
 } from "./markdownNavigation";
-import type { ContentNode } from "./types";
+import type { ContentNode, MarkdownBookmark } from "./types";
 import { installVditorContractIcon, withLucideToolbarIcons } from "./vditorToolbarIcons";
 
 export interface HyperSpaceVditorProps {
   pageId: string;
   value: string;
   nodes: ContentNode[];
+  bookmarks: MarkdownBookmark[];
   readOnly: boolean;
   theme?: "light" | "dark";
   onChange: (markdown: string) => void;
   onNavigateNode: (nodeId: string) => void;
+  onToggleBookmark: (line: number, label: string) => void;
   onActiveHeadingChange?: (headingId: string | null) => void;
   onCursorChange?: (position: { line: number; column: number }) => void;
 }
@@ -160,6 +163,705 @@ function editorSurface(root: HTMLElement) {
   return root.querySelector<HTMLElement>(
     ".vditor-ir pre.vditor-reset, .vditor-wysiwyg pre.vditor-reset",
   );
+}
+
+const LINE_NUMBER_SKIP = ".vditor-copy, .vditor-linenumber__rows";
+
+function skipIrLineSubtree(element: Element, allowPreview: boolean, reject: Element[] = []) {
+  if (reject.some((node) => node === element || node.contains(element))) return true;
+  if (element.closest(LINE_NUMBER_SKIP)) return true;
+  if (!allowPreview && element.closest(".vditor-ir__preview")) return true;
+  return false;
+}
+
+function irLineFilter(allowPreview: boolean, reject: Element[] = []): NodeFilter {
+  return {
+    acceptNode(node) {
+      if (node instanceof Element) {
+        if (skipIrLineSubtree(node, allowPreview, reject)) return NodeFilter.FILTER_REJECT;
+        if (node.tagName === "BR") return NodeFilter.FILTER_ACCEPT;
+        return NodeFilter.FILTER_SKIP;
+      }
+      const parent = node.parentElement;
+      if (!parent || skipIrLineSubtree(parent, allowPreview, reject)) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  };
+}
+
+function rectAtText(node: Text, offset: number) {
+  const length = node.nodeValue?.length ?? 0;
+  if (!length) return null;
+  const start = Math.min(offset, length - 1);
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, Math.min(start + 1, length));
+  const rect = range.getBoundingClientRect();
+  return rect.height < 1 && rect.width < 1 ? null : rect;
+}
+
+type LineBox = { top: number; height: number };
+
+const FOLDED_SECTION_CLASS = "hyperspace-vditor__section-folded";
+const COLLAPSED_HEADING_CLASS = "hyperspace-vditor__heading-collapsed";
+
+function pushLineBox(lines: LineBox[], rect: { top: number; height: number; width?: number } | null, originTop: number) {
+  if (!rect || (rect.height < 1 && (rect.width ?? 1) < 1)) return;
+  const top = rect.top - originTop;
+  const previous = lines.at(-1);
+  if (previous && top < previous.top + previous.height * 0.5) return;
+  lines.push({ top, height: Math.max(rect.height, 1) });
+}
+
+function cssContentFirstLine(element: HTMLElement) {
+  const style = window.getComputedStyle(element);
+  const box = element.getBoundingClientRect();
+  const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+  const borderTop = Number.parseFloat(style.borderTopWidth) || 0;
+  let lineHeight = Number.parseFloat(style.lineHeight);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+    const fontSize = Number.parseFloat(style.fontSize);
+    lineHeight = Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.2 : 28;
+  }
+  return {
+    top: box.top + paddingTop + borderTop,
+    height: lineHeight,
+  };
+}
+
+function headingVisualLineCount(element: HTMLElement) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest(".vditor-ir__marker, wbr")) return NodeFilter.FILTER_REJECT;
+      const value = (node.nodeValue ?? "").replaceAll(ZWSP, "");
+      return value.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const tops: number[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (!(node instanceof Text)) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.height < 1 || rect.width < 1) continue;
+      if (!tops.some((top) => Math.abs(top - rect.top) < 1)) tops.push(rect.top);
+    }
+  }
+  return Math.max(1, tops.length);
+}
+
+function lastContentLineBox(element: HTMLElement) {
+  if (isIrHeading(element)) {
+    const first = cssContentFirstLine(element);
+    const count = headingVisualLineCount(element);
+    return { top: first.top + (count - 1) * first.height, height: first.height };
+  }
+  const style = window.getComputedStyle(element);
+  const box = element.getBoundingClientRect();
+  const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
+  const borderBottom = Number.parseFloat(style.borderBottomWidth) || 0;
+  let lineHeight = Number.parseFloat(style.lineHeight);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+    const fontSize = Number.parseFloat(style.fontSize);
+    lineHeight = Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.2 : 24;
+  }
+  const bottom = box.bottom - paddingBottom - borderBottom;
+  const height = Math.min(lineHeight, Math.max(box.height - paddingBottom, 8));
+  return { top: bottom - height, height };
+}
+
+function collectHeadingLineBoxes(element: HTMLElement, originTop: number, lines: LineBox[]) {
+  const first = cssContentFirstLine(element);
+  const count = headingVisualLineCount(element);
+  for (let index = 0; index < count; index += 1) {
+    pushLineBox(lines, {
+      top: first.top + index * first.height,
+      height: first.height,
+    }, originTop);
+  }
+}
+
+function firstLineBox(element: HTMLElement, reject: Element[] = []) {
+  const walker = document.createTreeWalker(
+    element,
+    NodeFilter.SHOW_TEXT,
+    irLineFilter(false, reject),
+  );
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (!(node instanceof Text)) continue;
+    const rect = rectAtText(node, 0);
+    if (rect) return { top: rect.top, height: rect.height };
+  }
+  const box = element.getBoundingClientRect();
+  const lineHeight = Number.parseFloat(window.getComputedStyle(element).lineHeight);
+  const height = Number.isFinite(lineHeight) && lineHeight > 0
+    ? Math.min(lineHeight, Math.max(box.height, 1))
+    : Math.max(box.height, 1);
+  return { top: box.top, height };
+}
+
+function collectTextLineBoxes(
+  element: HTMLElement,
+  originTop: number,
+  lines: LineBox[],
+  allowPreview: boolean,
+  reject: Element[] = [],
+) {
+  const before = lines.length;
+  pushLineBox(lines, firstLineBox(element, reject), originTop);
+  let pending = false;
+  const walker = document.createTreeWalker(
+    element,
+    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+    irLineFilter(allowPreview, reject),
+  );
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (node instanceof Element) {
+      pending = true;
+      continue;
+    }
+    if (!(node instanceof Text)) continue;
+    const value = node.nodeValue ?? "";
+    let start = 0;
+    while (start <= value.length) {
+      if (pending) {
+        if (start < value.length && value[start] !== "\n") {
+          pushLineBox(lines, rectAtText(node, start), originTop);
+          pending = false;
+        } else if (start < value.length) {
+          pending = true;
+          start += 1;
+          continue;
+        } else {
+          break;
+        }
+      }
+      const newline = value.indexOf("\n", start);
+      if (newline === -1) break;
+      pending = true;
+      start = newline + 1;
+    }
+  }
+  if (lines.length === before) pushLineBox(lines, element.getBoundingClientRect(), originTop);
+}
+
+function isIrNestedBlock(element: HTMLElement) {
+  const type = element.getAttribute("data-type");
+  return element.tagName === "UL"
+    || element.tagName === "OL"
+    || element.tagName === "BLOCKQUOTE"
+    || element.tagName === "TABLE"
+    || type === "code-block"
+    || type === "yaml-front-matter"
+    || type === "math-block"
+    || type === "html-block"
+    || type === "table";
+}
+
+function collectIrBlockLines(element: HTMLElement, originTop: number, lines: LineBox[]) {
+  if (element.classList.contains(FOLDED_SECTION_CLASS)) return;
+  if (isIrHeading(element)) {
+    collectHeadingLineBoxes(element, originTop, lines);
+    return;
+  }
+  const type = element.getAttribute("data-type");
+  if (element.tagName === "UL" || element.tagName === "OL") {
+    for (const item of element.children) {
+      if (item instanceof HTMLElement && item.tagName === "LI") {
+        collectIrBlockLines(item, originTop, lines);
+      }
+    }
+    return;
+  }
+  if (element.tagName === "BLOCKQUOTE") {
+    for (const child of element.children) {
+      if (child instanceof HTMLElement) collectIrBlockLines(child, originTop, lines);
+    }
+    return;
+  }
+  if (element.tagName === "TABLE" || type === "table") {
+    for (const row of element.querySelectorAll("tr")) {
+      if (row instanceof HTMLElement) pushLineBox(lines, row.getBoundingClientRect(), originTop);
+    }
+    return;
+  }
+
+  const fenced = type === "code-block"
+    || type === "yaml-front-matter"
+    || type === "math-block"
+    || type === "html-block";
+  if (fenced) {
+    const expanded = element.classList.contains("vditor-ir__node--expand");
+    if (!expanded) {
+      const embed = element.querySelector<HTMLElement>(".hs-embed-host");
+      if (embed) {
+        pushLineBox(lines, embed.getBoundingClientRect(), originTop);
+        return;
+      }
+    }
+    const target = expanded
+      ? element.querySelector<HTMLElement>("pre.vditor-ir__marker--pre code")
+        ?? element.querySelector<HTMLElement>("pre.vditor-ir__marker--pre")
+        ?? element
+      : element.querySelector<HTMLElement>(".vditor-ir__preview code")
+        ?? element.querySelector<HTMLElement>(".vditor-ir__preview")
+        ?? element;
+    collectTextLineBoxes(target, originTop, lines, !expanded);
+    return;
+  }
+
+  const nested = element.tagName === "LI"
+    ? [...element.children].filter((child): child is HTMLElement => (
+      child instanceof HTMLElement && isIrNestedBlock(child)
+    ))
+    : [];
+  collectTextLineBoxes(element, originTop, lines, false, nested);
+  for (const child of nested) collectIrBlockLines(child, originTop, lines);
+}
+
+function collectIrLineBoxes(surface: HTMLElement) {
+  const originTop = surface.getBoundingClientRect().top;
+  const lines: LineBox[] = [];
+  for (const child of surface.children) {
+    if (!(child instanceof HTMLElement) || child.classList.contains(FOLDED_SECTION_CLASS)) continue;
+    collectIrBlockLines(child, originTop, lines);
+  }
+  if (!lines.length) {
+    const style = window.getComputedStyle(surface);
+    const paddingTop = Number.parseFloat(style.paddingTop);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+    lines.push({
+      top: Number.isFinite(paddingTop) ? paddingTop : 0,
+      height: Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 28,
+    });
+  }
+  return lines;
+}
+
+function isIrHeading(element: Element) {
+  return /^H[1-6]$/.test(element.tagName);
+}
+
+function headingLevelFromTag(element: HTMLElement) {
+  const match = element.tagName.match(/^H([1-6])$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function headingSection(heading: HTMLElement) {
+  const level = headingLevelFromTag(heading);
+  const blocks: HTMLElement[] = [];
+  let sibling = heading.nextElementSibling;
+  while (sibling instanceof HTMLElement) {
+    if (isIrHeading(sibling) && headingLevelFromTag(sibling) <= level) break;
+    blocks.push(sibling);
+    sibling = sibling.nextElementSibling;
+  }
+  return blocks;
+}
+
+function applyHeadingFolds(surface: HTMLElement, collapsed: Set<string>) {
+  const liveIds = new Set<string>();
+  const shouldFold = new Set<HTMLElement>();
+  const shouldCollapse = new Set<HTMLElement>();
+  for (const heading of surface.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")) {
+    const id = heading.dataset.hsHeadingId;
+    if (id) liveIds.add(id);
+    if (!id || !collapsed.has(id)) continue;
+    const section = headingSection(heading);
+    if (!section.length) continue;
+    shouldCollapse.add(heading);
+    for (const block of section) shouldFold.add(block);
+  }
+  for (const id of [...collapsed]) {
+    if (!liveIds.has(id)) collapsed.delete(id);
+  }
+  for (const node of surface.querySelectorAll(`.${FOLDED_SECTION_CLASS}`)) {
+    if (node instanceof HTMLElement && !shouldFold.has(node)) node.classList.remove(FOLDED_SECTION_CLASS);
+  }
+  for (const node of surface.querySelectorAll(`.${COLLAPSED_HEADING_CLASS}`)) {
+    if (node instanceof HTMLElement && !shouldCollapse.has(node)) node.classList.remove(COLLAPSED_HEADING_CLASS);
+  }
+  for (const node of shouldFold) {
+    if (!node.classList.contains(FOLDED_SECTION_CLASS)) node.classList.add(FOLDED_SECTION_CLASS);
+  }
+  for (const node of shouldCollapse) {
+    if (!node.classList.contains(COLLAPSED_HEADING_CLASS)) node.classList.add(COLLAPSED_HEADING_CLASS);
+  }
+}
+
+function gutterLayer(gutter: HTMLDivElement, className: string) {
+  for (const child of gutter.children) {
+    if (child instanceof HTMLDivElement && child.className === className) return child;
+  }
+  const layer = document.createElement("div");
+  layer.className = className;
+  gutter.append(layer);
+  return layer;
+}
+
+type StructureRange = {
+  id: string;
+  level: number;
+  text: string;
+  foldable: boolean;
+  collapsed: boolean;
+  hasEnd: boolean;
+  top: number;
+  height: number;
+  startHeight: number;
+  endHeight: number;
+};
+
+function visibleStructureHeadings(surface: HTMLElement) {
+  return [...surface.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")]
+    .filter((heading) => (
+      !heading.classList.contains(FOLDED_SECTION_CLASS)
+      && !heading.closest(`.${FOLDED_SECTION_CLASS}`)
+    ));
+}
+
+function collectStructureRanges(surface: HTMLElement, collapsed: Set<string>): StructureRange[] {
+  const originTop = surface.getBoundingClientRect().top;
+  return visibleStructureHeadings(surface).flatMap((heading) => {
+    const id = heading.dataset.hsHeadingId;
+    if (!id) return [];
+    const start = cssContentFirstLine(heading);
+    const section = headingSection(heading);
+    const foldable = section.length > 0;
+    const isCollapsed = collapsed.has(id);
+    const end = !isCollapsed && foldable
+      ? lastContentLineBox(section.at(-1) ?? heading)
+      : start;
+    const top = start.top - originTop;
+    const bottom = end.top + end.height - originTop;
+    const hasEnd = !isCollapsed && foldable && bottom - top > 18;
+    return [{
+      id,
+      level: headingLevelFromTag(heading),
+      text: headingLabelFromElement(heading),
+      foldable,
+      collapsed: isCollapsed,
+      hasEnd,
+      top,
+      height: Math.max(start.height, hasEnd ? bottom - top : start.height),
+      startHeight: start.height,
+      endHeight: end.height,
+    } satisfies StructureRange];
+  });
+}
+
+function structureAnchorButton(kind: "start" | "end") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `hyperspace-vditor__structure-anchor is-${kind}`;
+  return button;
+}
+
+function syncStructureAnchor(
+  button: HTMLButtonElement,
+  range: StructureRange,
+  kind: "start" | "end",
+) {
+  button.dataset.headingId = range.id;
+  button.dataset.level = String(range.level);
+  button.disabled = !range.foldable;
+  const label = kind === "end"
+    ? `「${range.text}」结束`
+    : !range.foldable
+      ? range.text
+      : range.collapsed ? `展开「${range.text}」` : `收拢「${range.text}」`;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  if (kind === "start") {
+    button.style.top = `${Math.max(0, (range.startHeight - 20) / 2)}px`;
+    button.style.bottom = "auto";
+  } else {
+    button.style.top = "auto";
+    button.style.bottom = `${Math.max(0, (range.endHeight - 20) / 2)}px`;
+  }
+}
+
+function syncStructureRange(element: HTMLDivElement, range: StructureRange) {
+  element.dataset.headingId = range.id;
+  element.dataset.level = String(range.level);
+  element.dataset.foldable = range.foldable ? "1" : "0";
+  element.classList.toggle("is-collapsed", range.collapsed);
+  element.classList.toggle("has-end", range.hasEnd);
+  element.style.top = `${range.top}px`;
+  element.style.height = `${range.height}px`;
+  element.style.zIndex = String(range.level);
+  element.setAttribute("aria-expanded", range.collapsed ? "false" : "true");
+
+  let start = element.querySelector<HTMLButtonElement>(":scope > .is-start");
+  if (!start) {
+    start = structureAnchorButton("start");
+    element.prepend(start);
+  }
+  syncStructureAnchor(start, range, "start");
+
+  let end = element.querySelector<HTMLButtonElement>(":scope > .is-end");
+  if (range.hasEnd) {
+    if (!end) {
+      end = structureAnchorButton("end");
+      element.append(end);
+    }
+    syncStructureAnchor(end, range, "end");
+  } else {
+    end?.remove();
+  }
+}
+
+function renderStructureAnchors(layer: HTMLDivElement, surface: HTMLElement, collapsed: Set<string>) {
+  const ranges = collectStructureRanges(surface, collapsed);
+  if (layer.childElementCount === ranges.length) {
+    const same = ranges.every((range, index) => {
+      const child = layer.children[index];
+      return child instanceof HTMLElement && child.dataset.headingId === range.id;
+    });
+    if (same) {
+      for (let index = 0; index < ranges.length; index += 1) {
+        const child = layer.children[index];
+        if (child instanceof HTMLDivElement) syncStructureRange(child, ranges[index]);
+      }
+      return;
+    }
+  }
+
+  layer.replaceChildren(...ranges.map((range) => {
+    const element = document.createElement("div");
+    element.className = "hyperspace-vditor__structure-range";
+    syncStructureRange(element, range);
+    return element;
+  }));
+}
+
+function isLineNumberNode(node: Node | null) {
+  const element = node instanceof Element ? node : node?.parentElement;
+  return Boolean(element?.closest(".hyperspace-vditor__line-numbers, .hyperspace-vditor__structure"));
+}
+
+function ensureLineGutter(anchor: Element, className: string) {
+  const next = anchor.nextElementSibling;
+  if (next instanceof HTMLDivElement && next.className === className) return next;
+  if (next instanceof HTMLElement && next.classList.contains("hyperspace-vditor__line-numbers")) next.remove();
+  const gutter = document.createElement("div");
+  gutter.className = className;
+  gutter.setAttribute("aria-hidden", "true");
+  anchor.insertAdjacentElement("afterend", gutter);
+  return gutter;
+}
+
+function installSourceLineNumbers(
+  root: HTMLElement,
+  getMarkdown: () => string,
+  getBookmarks: () => MarkdownBookmark[],
+  onToggleBookmark: (line: number, label: string) => void,
+) {
+  let svGutter: HTMLDivElement | null = null;
+  let irGutter: HTMLDivElement | null = null;
+  let frame = 0;
+  let contextMenu: HTMLDivElement | null = null;
+  const collapsedHeadings = new Set<string>();
+
+  const syncLineNumber = (span: HTMLElement, line: number) => {
+    span.textContent = String(line);
+    span.dataset.line = String(line);
+    span.classList.toggle("has-bookmark", getBookmarks().some((bookmark) => bookmark.line === line));
+  };
+
+  const closeContextMenu = () => {
+    contextMenu?.remove();
+    contextMenu = null;
+  };
+
+  const onLineContextMenu = (event: MouseEvent) => {
+    const lineElement = event.target instanceof Element
+      ? event.target.closest<HTMLElement>(".hyperspace-vditor__line-numbers-list > span")
+      : null;
+    const line = Number(lineElement?.dataset.line ?? 0);
+    if (!line) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeContextMenu();
+    const existing = getBookmarks().some((bookmark) => bookmark.line === line);
+    const menu = document.createElement("div");
+    menu.className = "markdown-context-menu";
+    menu.setAttribute("role", "menu");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = existing ? "移除 Bookmark" : "添加 Bookmark";
+    button.addEventListener("click", () => {
+      const label = getMarkdown().split("\n")[line - 1]?.trim() || `第 ${line} 行`;
+      onToggleBookmark(line, label);
+      lineElement?.classList.toggle("has-bookmark", !existing);
+      closeContextMenu();
+    });
+    menu.append(button);
+    document.body.append(menu);
+    const bounds = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - bounds.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - bounds.height - 8))}px`;
+    contextMenu = menu;
+  };
+
+  const onDismissContextMenu = (event: Event) => {
+    if (contextMenu?.contains(event.target as Node)) return;
+    closeContextMenu();
+  };
+
+  document.addEventListener("pointerdown", onDismissContextMenu);
+  window.addEventListener("blur", closeContextMenu);
+
+  const renderSv = () => {
+    const textarea = root.querySelector<HTMLTextAreaElement>("textarea.vditor-sv");
+    if (!textarea) {
+      svGutter?.remove();
+      svGutter = null;
+      return;
+    }
+
+    svGutter = ensureLineGutter(textarea, "hyperspace-vditor__line-numbers");
+    const hidden = window.getComputedStyle(textarea).display === "none";
+    svGutter.hidden = hidden;
+    if (hidden) return;
+
+    const lineCount = textarea.value.split("\n").length;
+    if (Number(svGutter.dataset.lineCount ?? 0) !== lineCount) {
+      svGutter.textContent = Array.from({ length: lineCount }, (_, index) => String(index + 1)).join("\n");
+      svGutter.dataset.lineCount = String(lineCount);
+    }
+
+    const textareaStyle = window.getComputedStyle(textarea);
+    const parentRect = textarea.parentElement?.getBoundingClientRect();
+    const textareaRect = textarea.getBoundingClientRect();
+    if (!parentRect) return;
+    svGutter.style.left = `${textareaRect.left - parentRect.left}px`;
+    svGutter.style.top = `${textareaRect.top - parentRect.top + Number.parseFloat(textareaStyle.paddingTop)}px`;
+    svGutter.style.width = textareaStyle.paddingLeft;
+    svGutter.style.fontFamily = textareaStyle.fontFamily;
+    svGutter.style.fontSize = textareaStyle.fontSize;
+    svGutter.style.lineHeight = textareaStyle.lineHeight;
+  };
+
+  const onStructureClick = (event: Event) => {
+    const range = event.target instanceof Element
+      ? event.target.closest<HTMLElement>(".hyperspace-vditor__structure-range")
+      : null;
+    if (!range || range.dataset.foldable !== "1") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const id = range.dataset.headingId;
+    if (!id) return;
+    if (collapsedHeadings.has(id)) collapsedHeadings.delete(id);
+    else collapsedHeadings.add(id);
+    schedule();
+  };
+
+  const onStructureMouseDown = (event: MouseEvent) => {
+    if (event.target instanceof Element && event.target.closest(".hyperspace-vditor__structure-range")) {
+      event.preventDefault();
+    }
+  };
+
+  const renderIr = () => {
+    const surface = root.querySelector<HTMLElement>(".vditor-ir pre.vditor-reset");
+    const pane = surface?.parentElement;
+    if (!surface || !pane || window.getComputedStyle(pane).display === "none") {
+      irGutter?.remove();
+      irGutter = null;
+      return;
+    }
+
+    annotateHeadingElements(root, getMarkdown());
+    applyHeadingFolds(surface, collapsedHeadings);
+
+    irGutter = ensureLineGutter(surface, "hyperspace-vditor__line-numbers hyperspace-vditor__line-numbers--ir");
+    irGutter.removeAttribute("aria-hidden");
+    const paneRect = pane.getBoundingClientRect();
+    const surfaceRect = surface.getBoundingClientRect();
+    irGutter.hidden = false;
+    irGutter.style.left = "0";
+    irGutter.style.removeProperty("width");
+    irGutter.style.top = `${surfaceRect.top - paneRect.top}px`;
+    irGutter.style.height = `${surface.offsetHeight}px`;
+    if (!irGutter.dataset.structureBound) {
+      irGutter.dataset.structureBound = "1";
+      irGutter.addEventListener("click", onStructureClick);
+      irGutter.addEventListener("mousedown", onStructureMouseDown);
+      irGutter.addEventListener("contextmenu", onLineContextMenu);
+    }
+
+    const numberLayer = gutterLayer(irGutter, "hyperspace-vditor__line-numbers-list");
+    const structureLayer = gutterLayer(irGutter, "hyperspace-vditor__structure");
+    const lines = collectIrLineBoxes(surface);
+    if (Number(irGutter.dataset.lineCount ?? 0) !== lines.length || numberLayer.childElementCount !== lines.length) {
+      numberLayer.replaceChildren(...lines.map((line, index) => {
+        const span = document.createElement("span");
+        syncLineNumber(span, index + 1);
+        span.style.top = `${line.top}px`;
+        span.style.height = `${line.height}px`;
+        return span;
+      }));
+      irGutter.dataset.lineCount = String(lines.length);
+    } else {
+      for (let index = 0; index < lines.length; index += 1) {
+        const span = numberLayer.children[index];
+        if (!(span instanceof HTMLElement)) continue;
+        syncLineNumber(span, index + 1);
+        span.style.top = `${lines[index].top}px`;
+        span.style.height = `${lines[index].height}px`;
+      }
+    }
+
+    renderStructureAnchors(structureLayer, surface, collapsedHeadings);
+  };
+
+  const render = () => {
+    renderSv();
+    renderIr();
+  };
+
+  const schedule = () => {
+    if (frame) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = 0;
+      render();
+    });
+  };
+
+  root.addEventListener("input", schedule);
+  const mutations = new MutationObserver((records) => {
+    if (records.some((record) => !isLineNumberNode(record.target))) schedule();
+  });
+  mutations.observe(root, {
+    attributes: true,
+    attributeFilter: ["class", "style"],
+    childList: true,
+    subtree: true,
+  });
+  const resize = new ResizeObserver(schedule);
+  resize.observe(root);
+  schedule();
+
+  return () => {
+    window.cancelAnimationFrame(frame);
+    root.removeEventListener("input", schedule);
+    mutations.disconnect();
+    resize.disconnect();
+    irGutter?.removeEventListener("click", onStructureClick);
+    irGutter?.removeEventListener("mousedown", onStructureMouseDown);
+    irGutter?.removeEventListener("contextmenu", onLineContextMenu);
+    document.removeEventListener("pointerdown", onDismissContextMenu);
+    window.removeEventListener("blur", closeContextMenu);
+    closeContextMenu();
+    svGutter?.remove();
+    irGutter?.remove();
+  };
 }
 
 function isEmptyParagraph(element: Element | null): element is HTMLElement {
@@ -344,10 +1046,12 @@ export function HyperSpaceVditor({
   pageId,
   value,
   nodes,
+  bookmarks,
   readOnly,
   theme = "light",
   onChange,
   onNavigateNode,
+  onToggleBookmark,
   onActiveHeadingChange,
   onCursorChange,
 }: HyperSpaceVditorProps) {
@@ -356,10 +1060,12 @@ export function HyperSpaceVditor({
   const readyRef = useRef(false);
   const valueRef = useRef(value);
   const nodesRef = useRef(nodes);
+  const bookmarksRef = useRef(bookmarks);
   const readOnlyRef = useRef(readOnly);
   const themeRef = useRef(theme);
   const onChangeRef = useRef(onChange);
   const onNavigateRef = useRef(onNavigateNode);
+  const onToggleBookmarkRef = useRef(onToggleBookmark);
   const onHeadingRef = useRef(onActiveHeadingChange);
   const onCursorRef = useRef(onCursorChange);
   const applyingExternalRef = useRef(false);
@@ -370,10 +1076,12 @@ export function HyperSpaceVditor({
 
   valueRef.current = value;
   nodesRef.current = nodes;
+  bookmarksRef.current = bookmarks;
   readOnlyRef.current = readOnly;
   themeRef.current = theme;
   onChangeRef.current = onChange;
   onNavigateRef.current = onNavigateNode;
+  onToggleBookmarkRef.current = onToggleBookmark;
   onHeadingRef.current = onActiveHeadingChange;
   onCursorRef.current = onCursorChange;
 
@@ -567,6 +1275,12 @@ export function HyperSpaceVditor({
     mount.addEventListener("keyup", onKey);
     mount.addEventListener("mouseup", onPointer);
     mount.addEventListener("click", onClick);
+    const removeSourceLineNumbers = installSourceLineNumbers(
+      mount,
+      () => valueRef.current,
+      () => bookmarksRef.current,
+      (line, label) => onToggleBookmarkRef.current(line, label),
+    );
 
     const popovers = new MutationObserver((mutations) => {
       const rebuilt = mutations.some((mutation) => mutation.target instanceof Element
@@ -583,6 +1297,7 @@ export function HyperSpaceVditor({
       mount.removeEventListener("keyup", onKey);
       mount.removeEventListener("mouseup", onPointer);
       mount.removeEventListener("click", onClick);
+      removeSourceLineNumbers();
       destroyMount(instance ?? instanceRef.current);
     };
   }, [pageId, rebuildKey]);
