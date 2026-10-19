@@ -268,6 +268,10 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
   const pointerDrag = useContext(PointerDragContext);
   const isEditing = rename.editingId === node.id;
   const menuOpen = menu !== null;
+  // Tags and markers are workspace metadata, so folders support them just like
+  // pages and files. Keeping this explicit makes it harder to accidentally
+  // reintroduce a node-kind restriction in the menu or row rendering.
+  const supportsMetadata = node.data.kind === "page" || node.data.kind === "file" || node.data.kind === "folder";
 
   useLayoutEffect(() => {
     if (!isEditing) return;
@@ -319,8 +323,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
     event.preventDefault();
     event.stopPropagation();
     node.select();
-    const supportsMarker = node.data.kind === "page" || node.data.kind === "file";
-    const next = clampTreeMenuPosition(event.clientX, event.clientY, supportsMarker ? 264 : 174, supportsMarker ? 352 : 228);
+    const next = clampTreeMenuPosition(event.clientX, event.clientY, supportsMetadata ? 264 : 174, supportsMetadata ? 352 : 228);
     setTagEditorOpen(false);
     setNewTagName("");
     setMenu({ x: next.x, y: next.y });
@@ -363,6 +366,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
       {isEditing ? (
         <input
           ref={inputRef}
+          key={node.id}
           className="tree-rename-input"
           defaultValue={node.data.title}
           aria-label="重命名"
@@ -399,7 +403,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
       ) : (
         <span className="tree-label">{node.data.title}</span>
       )}
-      {(node.data.kind === "page" || node.data.kind === "file") && (node.data.tagIds?.length ?? 0) > 0 && (
+      {supportsMetadata && (node.data.tagIds?.length ?? 0) > 0 && (
         <span className="tree-tags" aria-label={`标签：${node.data.tagIds?.map((id) => tagContext.tags.find((tag) => tag.id === id)?.name).filter(Boolean).join("、")}`}>
           {node.data.tagIds?.map((id) => tagContext.tags.find((tag) => tag.id === id)).filter((tag): tag is TagDefinition => Boolean(tag)).slice(0, 2).map((tag) => (
             <span key={tag.id} className="tree-tag" title={tag.name}>
@@ -420,7 +424,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
       {menu && createPortal(
         <div
           ref={menuRef}
-          className={`tree-context-menu is-pointer ${node.data.kind === "page" || node.data.kind === "file" ? "has-color-picker" : ""}`}
+          className={`tree-context-menu is-pointer ${supportsMetadata ? "has-color-picker" : ""}`}
           role="menu"
           style={{ top: menu.y, left: menu.x }}
           onMouseDown={(event) => event.stopPropagation()}
@@ -428,7 +432,7 @@ function FileTreeRow({ node, style }: NodeRendererProps<FileTreeNode>) {
           onContextMenu={(event) => event.preventDefault()}
         >
           <button role="menuitem" onClick={() => { closeMenu(); rename.startRename(node.id); }}><Pencil size={14} />重命名 <kbd>F2</kbd></button>
-          {(node.data.kind === "page" || node.data.kind === "file") && (
+          {supportsMetadata && (
             <>
               <span className="tree-menu-separator" />
               <div className="tree-color-menu" aria-label="颜色标记">
@@ -574,7 +578,7 @@ export const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileT
     runWhenTreeIsVisible((tree) => {
       void Promise.resolve(tree.scrollTo(id, "center")).then(() => {
         if (activeRenameId.current !== id) return;
-        const input = document.querySelector<HTMLInputElement>(".tree-rename-input");
+        const input = document.querySelector<HTMLInputElement>(`[data-tree-node-id="${CSS.escape(id)}"] .tree-rename-input`);
         if (!input) return;
         input.focus();
         selectEditableName(input);

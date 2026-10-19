@@ -1,7 +1,10 @@
 mod app_settings;
+mod ai_service;
 mod fs_open;
 mod fs_watch;
 mod git_service;
+#[cfg(target_os = "macos")]
+mod macos_window;
 mod project_settings;
 mod terminal_service;
 mod workspace_store;
@@ -9,6 +12,8 @@ mod workspace_store;
 use std::{
     fs,
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 use tauri::{
     menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
@@ -80,6 +85,8 @@ fn write_current_project(app: &AppHandle, project_path: &Path) -> Result<(), Str
 fn load_workspace(app: AppHandle) -> Result<Option<String>, String> {
     if let Some(project_path) = read_current_project(&app)? {
         let options = app_settings::scan_options(&app);
+        git_service::ensure_project_support_files(&project_path)?;
+        allow_project_assets(&app, &project_path);
         let workspace =
             workspace_store::open_project_workspace_with_options(&project_path, &options);
         if let Err(error) = fs_watch::start_watching(&app, &project_path) {
@@ -98,14 +105,45 @@ fn load_workspace(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn save_workspace(app: AppHandle, payload: String) -> Result<(), String> {
-    serde_json::from_str::<serde_json::Value>(&payload)
-        .map_err(|error| format!("Workspace payload is not valid JSON: {error}"))?;
-    if let Some(project_path) = read_current_project(&app)? {
+async fn save_workspace(app: AppHandle, payload: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::from_str::<serde_json::Value>(&payload)
+            .map_err(|error| format!("Workspace payload is not valid JSON: {error}"))?;
+        if let Some(project_path) = read_current_project(&app)? {
+            fs_watch::quiet_watch(&app);
+            git_service::ensure_project_support_files(&project_path)?;
+            let saved = workspace_store::save_project_workspace(&project_path, &payload);
+            // Cover the debounced watch event that arrives after the write returns.
+            fs_watch::quiet_watch(&app);
+            return saved;
+        }
+        workspace_store::write_atomic(&app_data_dir(&app)?.join(WORKSPACE_FILE), &payload)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result)
+}
+
+#[tauri::command]
+async fn save_markdown_notes(
+    app: AppHandle,
+    notes: Vec<workspace_store::MarkdownNoteSave>,
+    selected_node_id: Option<String>,
+) -> Result<(), String> {
+    let project_path = require_current_project(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
         fs_watch::quiet_watch(&app);
-        return workspace_store::save_project_workspace(&project_path, &payload);
-    }
-    workspace_store::write_atomic(&app_data_dir(&app)?.join(WORKSPACE_FILE), &payload)
+        let saved = workspace_store::save_markdown_notes(
+            &project_path,
+            &notes,
+            selected_node_id.as_deref(),
+        );
+        fs_watch::quiet_watch(&app);
+        saved
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result)
 }
 
 #[tauri::command]
@@ -138,6 +176,8 @@ fn open_project(app: AppHandle, path: String) -> Result<Option<String>, String> 
     }
 
     let options = app_settings::scan_options(&app);
+    git_service::ensure_project_support_files(&project_path)?;
+    allow_project_assets(&app, &project_path);
     let workspace =
         workspace_store::open_project_workspace_with_options(&project_path, &options)?;
     write_current_project(&app, &project_path)?;
@@ -182,6 +222,7 @@ fn create_project(
     }
 
     workspace_store::save_project_workspace(&project_path, &workspace_payload)?;
+    allow_project_assets(&app, &project_path);
     write_current_project(&app, &project_path)?;
     if let Err(error) = fs_watch::start_watching(&app, &project_path) {
         eprintln!("Failed to watch project: {error}");
@@ -192,6 +233,12 @@ fn create_project(
 
 fn require_current_project(app: &AppHandle) -> Result<PathBuf, String> {
     read_current_project(app)?.ok_or_else(|| "当前没有打开的项目".into())
+}
+
+fn allow_project_assets(app: &AppHandle, project_path: &Path) {
+    if let Err(error) = app.asset_protocol_scope().allow_directory(project_path, true) {
+        eprintln!("Failed to grant asset access for project: {error}");
+    }
 }
 
 #[tauri::command]
@@ -212,12 +259,53 @@ fn git_commit_all(
 }
 
 #[tauri::command]
+fn git_pull(app: AppHandle) -> Result<git_service::GitRepositoryInfo, String> {
+    let project_path = require_current_project(&app)?;
+    let toolchain = project_settings::resolve_git_toolchain(&app, &project_path)?;
+    git_service::pull(&toolchain, &project_path)
+}
+
+#[tauri::command]
+fn git_push(app: AppHandle) -> Result<git_service::GitRepositoryInfo, String> {
+    let project_path = require_current_project(&app)?;
+    let toolchain = project_settings::resolve_git_toolchain(&app, &project_path)?;
+    git_service::push(&toolchain, &project_path)
+}
+
+#[tauri::command]
 fn search_workspace(
     app: AppHandle,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<workspace_store::SearchResult>, String> {
     workspace_store::search_project(&require_current_project(&app)?, &query, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn import_editor_image(
+    app: AppHandle,
+    source_path: Option<String>,
+    file_name: Option<String>,
+    bytes: Option<Vec<u8>>,
+    note_relative_path: Option<String>,
+) -> Result<workspace_store::ImportedEditorImage, String> {
+    let project_path = require_current_project(&app)?;
+    allow_project_assets(&app, &project_path);
+    fs_watch::quiet_watch(&app);
+    let source = source_path.as_deref().map(Path::new);
+    let imported = workspace_store::import_editor_image(
+        &project_path,
+        source,
+        bytes.as_deref(),
+        file_name.as_deref(),
+        note_relative_path.as_deref().unwrap_or(""),
+    )?;
+    let app_for_refresh = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(2200));
+        fs_watch::refresh_workspace_tree(&app_for_refresh);
+    });
+    Ok(imported)
 }
 
 #[tauri::command]
@@ -523,6 +611,13 @@ pub fn run() {
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
 
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(ns_window) = window.ns_window() {
+                    macos_window::fit_overlay_titlebar_tiling(ns_window);
+                }
+            }
+
             app.on_menu_event(|app, event| {
                 if event.id().as_ref() == MENU_NEW_PROJECT {
                     let app = app.clone();
@@ -567,6 +662,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_workspace,
             save_workspace,
+            save_markdown_notes,
             app_data_directory,
             default_projects_directory,
             get_current_project,
@@ -574,7 +670,10 @@ pub fn run() {
             create_project,
             git_repository_info,
             git_commit_all,
+            git_pull,
+            git_push,
             search_workspace,
+            import_editor_image,
             import_pdf,
             create_workspace_entry,
             rename_workspace_entry,
@@ -590,6 +689,7 @@ pub fn run() {
             import_ssh_key,
             generate_ssh_key,
             delete_ssh_key,
+            ai_service::cursor_sdk_request,
             terminal_service::terminal_start,
             terminal_service::terminal_write,
             terminal_service::terminal_resize,

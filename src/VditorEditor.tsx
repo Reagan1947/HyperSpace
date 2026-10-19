@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Vditor from "vditor";
 import "vditor/dist/index.css";
+import {
+  isImagePath,
+  markdownImage,
+  restoreImageMarkdown,
+  rewriteEditorImages,
+} from "./editorImages";
 import {
   createHyperSpaceRenderer,
   insertHyperSpaceEmbed,
@@ -13,11 +20,13 @@ import {
   parseMarkdownHeadings,
 } from "./markdownNavigation";
 import type { ContentNode, MarkdownBookmark } from "./types";
-import { installVditorContractIcon, withLucideToolbarIcons } from "./vditorToolbarIcons";
+import { withOcticonsToolbarIcons } from "./vditorToolbarIcons";
 
 export interface HyperSpaceVditorProps {
   pageId: string;
   value: string;
+  projectPath?: string | null;
+  notePath?: string | null;
   nodes: ContentNode[];
   bookmarks: MarkdownBookmark[];
   readOnly: boolean;
@@ -160,16 +169,34 @@ function markdownEquals(left: string, right: string) {
 }
 
 function editorSurface(root: HTMLElement) {
-  return root.querySelector<HTMLElement>(
-    ".vditor-ir pre.vditor-reset, .vditor-wysiwyg pre.vditor-reset",
-  );
+  const ir = root.querySelector<HTMLElement>(".vditor-ir pre.vditor-reset");
+  const wysiwyg = root.querySelector<HTMLElement>(".vditor-wysiwyg pre.vditor-reset");
+  const irPane = ir?.closest<HTMLElement>(".vditor-ir");
+  const wysiwygPane = wysiwyg?.closest<HTMLElement>(".vditor-wysiwyg");
+  if (ir && irPane?.style.display !== "none") return ir;
+  if (wysiwyg && wysiwygPane?.style.display !== "none") return wysiwyg;
+  return ir ?? wysiwyg;
 }
 
+// Collapsed IR markers (`**`, `__`, `` ` ``) are 0×0 inline-blocks, but a range
+// around their glyphs still reports a full em and sits on the baseline. A block
+// that opens with one would pin its line number ~20px below the real text.
 const LINE_NUMBER_SKIP = ".vditor-copy, .vditor-linenumber__rows";
+
+function isCollapsedInlineMarker(element: Element) {
+  const marker = element.closest(".vditor-ir__marker");
+  // Expanded code fences reuse this class on `pre.vditor-ir__marker--pre`.
+  // Their source is the line content, so only the inline markers (`**`, `*`) are skipped.
+  if (!marker || marker.classList.contains("vditor-ir__marker--pre") || marker.closest(".vditor-ir__marker--pre")) {
+    return false;
+  }
+  return true;
+}
 
 function skipIrLineSubtree(element: Element, allowPreview: boolean, reject: Element[] = []) {
   if (reject.some((node) => node === element || node.contains(element))) return true;
   if (element.closest(LINE_NUMBER_SKIP)) return true;
+  if (isCollapsedInlineMarker(element)) return true;
   if (!allowPreview && element.closest(".vditor-ir__preview")) return true;
   return false;
 }
@@ -355,6 +382,7 @@ function isIrNestedBlock(element: HTMLElement) {
     || element.tagName === "OL"
     || element.tagName === "BLOCKQUOTE"
     || element.tagName === "TABLE"
+    || element.tagName === "HR"
     || type === "code-block"
     || type === "yaml-front-matter"
     || type === "math-block"
@@ -381,6 +409,10 @@ function collectIrBlockLines(element: HTMLElement, originTop: number, lines: Lin
     for (const child of element.children) {
       if (child instanceof HTMLElement) collectIrBlockLines(child, originTop, lines);
     }
+    return;
+  }
+  if (element.tagName === "HR") {
+    pushLineBox(lines, element.getBoundingClientRect(), originTop);
     return;
   }
   if (element.tagName === "TABLE" || type === "table") {
@@ -782,13 +814,18 @@ function installSourceLineNumbers(
 
     irGutter = ensureLineGutter(surface, "hyperspace-vditor__line-numbers hyperspace-vditor__line-numbers--ir");
     irGutter.removeAttribute("aria-hidden");
+    const scroller = pane.parentElement;
+    if (scroller instanceof HTMLElement) {
+      pane.style.minHeight = `${scroller.clientHeight}px`;
+    }
     const paneRect = pane.getBoundingClientRect();
     const surfaceRect = surface.getBoundingClientRect();
+    const surfaceOffset = Math.max(0, surfaceRect.top - paneRect.top);
     irGutter.hidden = false;
     irGutter.style.left = "0";
     irGutter.style.removeProperty("width");
-    irGutter.style.top = `${surfaceRect.top - paneRect.top}px`;
-    irGutter.style.height = `${surface.offsetHeight}px`;
+    irGutter.style.top = `${surfaceOffset}px`;
+    irGutter.style.height = `${Math.max(surface.offsetHeight, pane.clientHeight - surfaceOffset)}px`;
     if (!irGutter.dataset.structureBound) {
       irGutter.dataset.structureBound = "1";
       irGutter.addEventListener("click", onStructureClick);
@@ -886,9 +923,35 @@ function createEmptyParagraph() {
   return paragraph;
 }
 
-function placeCaretIn(element: HTMLElement) {
+function taskCheckbox(item: HTMLElement) {
+  const child = [...item.childNodes].find((node) => (
+    node instanceof HTMLInputElement && node.type === "checkbox"
+  ));
+  return child instanceof HTMLInputElement
+    ? child
+    : item.querySelector<HTMLInputElement>(":scope > input[type='checkbox']");
+}
+
+function caretIsBefore(range: Range, node: Node) {
+  const after = document.createRange();
+  try {
+    after.setStartAfter(node);
+    after.collapse(true);
+    return range.compareBoundaryPoints(Range.START_TO_START, after) < 0;
+  } catch {
+    return false;
+  }
+}
+
+function applyCaret(range: Range) {
   const selection = document.getSelection();
   if (!selection) return;
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function placeCaretAtStart(element: HTMLElement) {
   const node = element.firstChild ?? element;
   const range = document.createRange();
   if (node.nodeType === Node.TEXT_NODE) {
@@ -896,9 +959,53 @@ function placeCaretIn(element: HTMLElement) {
   } else {
     range.selectNodeContents(element);
   }
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
+  applyCaret(range);
+}
+
+/** Land after the checkbox so typing does not insert text in front of it. */
+function placeCaretAfterTaskCheckbox(item: HTMLElement) {
+  const checkbox = taskCheckbox(item);
+  if (!checkbox) {
+    placeCaretAtStart(item);
+    return;
+  }
+  const next = checkbox.nextSibling;
+  if (next instanceof HTMLElement && next.tagName === "P") {
+    placeCaretAtStart(next);
+    return;
+  }
+  let text = next;
+  if (!text || text.nodeType !== Node.TEXT_NODE) {
+    text = document.createTextNode(` ${ZWSP}`);
+    checkbox.after(text);
+  } else if ((text.textContent ?? "").length === 0) {
+    text.textContent = ` ${ZWSP}`;
+  }
+  const range = document.createRange();
+  range.setStart(text, Math.min(1, text.textContent?.length ?? 0));
+  applyCaret(range);
+}
+
+function placeCaretIn(element: HTMLElement) {
+  if (element.classList.contains("vditor-task") || taskCheckbox(element)) {
+    placeCaretAfterTaskCheckbox(element);
+    return;
+  }
+  placeCaretAtStart(element);
+}
+
+function restoreTaskCaret(root: HTMLElement) {
+  const selection = document.getSelection();
+  if (!selection?.rangeCount) return;
+  const node = selection.focusNode;
+  if (!node || !root.contains(node)) return;
+  const item = closestElement(node, "li.vditor-task");
+  if (!item) return;
+  const checkbox = taskCheckbox(item);
+  if (!checkbox) return;
+  if (caretIsBefore(selection.getRangeAt(0), checkbox)) {
+    placeCaretAfterTaskCheckbox(item);
+  }
 }
 
 function closestElement(node: Node, selector: string) {
@@ -915,6 +1022,19 @@ function caretAtEndOf(block: Element, range: Range) {
     return false;
   }
   const leftover = after.cloneContents();
+  leftover.querySelectorAll(".vditor-ir__marker, wbr").forEach((node) => node.remove());
+  return visibleText(leftover.textContent ?? "") === "";
+}
+
+function caretAtStartOf(block: Element, range: Range) {
+  const before = document.createRange();
+  try {
+    before.selectNodeContents(block);
+    before.setEnd(range.startContainer, range.startOffset);
+  } catch {
+    return false;
+  }
+  const leftover = before.cloneContents();
   leftover.querySelectorAll(".vditor-ir__marker, wbr").forEach((node) => node.remove());
   return visibleText(leftover.textContent ?? "") === "";
 }
@@ -988,6 +1108,160 @@ function consumeEnter(event: KeyboardEvent) {
   event.stopImmediatePropagation();
 }
 
+const THEMATIC_BREAK_MARKERS = /^(?:-{3,}|\*{3,}|_{3,})$/;
+
+function isThematicBreakText(text: string) {
+  return THEMATIC_BREAK_MARKERS.test(visibleText(text).replace(/\s+/g, ""));
+}
+
+function isThematicBreakProtected(node: Node) {
+  const element = node instanceof Element ? node : node.parentElement;
+  return Boolean(element?.closest(
+    '[data-type="code-block"], [data-type="math-block"], [data-type="html-block"], td, th',
+  ));
+}
+
+function yamlFrontMatterHost(element: HTMLElement) {
+  return element.closest<HTMLElement>('[data-type="yaml-front-matter"]');
+}
+
+function isEmptyYamlFence(host: HTMLElement) {
+  const body = host.querySelector("code")?.textContent ?? "";
+  if (/(?:^|\n)\s*id\s*:/.test(body) || /(?:^|\n)\s*schemaVersion\s*:/.test(body)) return false;
+  return visibleText(body) === "";
+}
+
+function thematicBreakBlock(node: Node, surface: HTMLElement) {
+  const element = node instanceof Element ? node : node.parentElement;
+  if (!element || !surface.contains(element) || isThematicBreakProtected(element)) return null;
+  const yaml = yamlFrontMatterHost(element);
+  if (yaml && surface.contains(yaml) && isEmptyYamlFence(yaml)) return yaml;
+  const item = element.closest<HTMLElement>("li");
+  if (item && surface.contains(item) && isThematicBreakText(item.textContent ?? "")) return item;
+  const paragraph = element.closest<HTMLElement>("p");
+  if (paragraph && surface.contains(paragraph) && isThematicBreakText(paragraph.textContent ?? "")) return paragraph;
+  return null;
+}
+
+function replaceBlockWithHr(block: HTMLElement) {
+  const item = block.tagName === "LI" ? block : null;
+  const list = item?.parentElement;
+  const hr = document.createElement("hr");
+  hr.setAttribute("data-block", "0");
+
+  if (item && list?.matches("ul, ol")) {
+    const following = document.createDocumentFragment();
+    while (item.nextElementSibling) following.append(item.nextElementSibling);
+    const rest = following.childElementCount === 0 ? null : list.cloneNode(false) as HTMLElement;
+    rest?.append(following);
+    item.remove();
+    if (list.childElementCount === 0) list.replaceWith(hr, ...rest ? [rest] : []);
+    else list.after(hr, ...rest ? [rest] : []);
+  } else {
+    block.replaceWith(hr);
+  }
+
+  const next = hr.nextElementSibling;
+  if (next instanceof HTMLElement) {
+    if (isEmptyParagraph(next)) placeCaretIn(next);
+    else placeCaretAtStart(next);
+    return;
+  }
+  const paragraph = createEmptyParagraph();
+  hr.after(paragraph);
+  placeCaretIn(paragraph);
+}
+
+function hrAroundCaret(surface: HTMLElement, range: Range, key: string) {
+  const start = range.startContainer;
+  const offset = range.startOffset;
+  const asElement = start instanceof Element ? start : start.parentElement;
+  if (asElement?.tagName === "HR") return asElement;
+
+  if (!range.collapsed) {
+    for (const node of surface.querySelectorAll("hr")) {
+      if (range.intersectsNode(node)) return node as HTMLElement;
+    }
+  }
+
+  if (key === "Backspace") {
+    if ((start === surface || asElement === surface) && offset > 0) {
+      const previous = (start === surface ? start : surface).childNodes[offset - 1];
+      if (previous instanceof HTMLElement && previous.tagName === "HR") return previous;
+    }
+    const block = closestElement(start, "p, h1, h2, h3, h4, h5, h6, blockquote, li, pre");
+    if (block && surface.contains(block) && caretAtStartOf(block, range)) {
+      const previous = block.previousElementSibling;
+      if (previous?.tagName === "HR") return previous;
+    }
+  }
+
+  if (key === "Delete") {
+    if (start === surface || asElement === surface) {
+      const at = surface.childNodes[offset];
+      if (at instanceof HTMLElement && at.tagName === "HR") return at;
+    }
+    const block = closestElement(start, "p, h1, h2, h3, h4, h5, h6, blockquote, li, pre");
+    if (block && surface.contains(block) && caretAtEndOf(block, range)) {
+      const next = block.nextElementSibling;
+      if (next?.tagName === "HR") return next;
+    }
+  }
+  return null;
+}
+
+function removeHr(hr: HTMLElement, surface: HTMLElement) {
+  const previous = hr.previousElementSibling;
+  const next = hr.nextElementSibling;
+  hr.remove();
+  if (next instanceof HTMLElement) {
+    if (isEmptyParagraph(next)) placeCaretIn(next);
+    else placeCaretAtStart(next);
+    return;
+  }
+  if (previous instanceof HTMLElement) {
+    const range = document.createRange();
+    range.selectNodeContents(previous);
+    range.collapse(false);
+    applyCaret(range);
+    return;
+  }
+  const paragraph = createEmptyParagraph();
+  surface.append(paragraph);
+  placeCaretIn(paragraph);
+}
+
+function handleHrKeydown(event: KeyboardEvent, root: HTMLElement) {
+  if (event.key !== "Backspace" && event.key !== "Delete") return false;
+  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return false;
+  const surface = editorSurface(root);
+  if (!surface) return false;
+  const selection = document.getSelection();
+  if (!selection?.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  if (!surface.contains(range.startContainer) && range.startContainer !== surface) return false;
+  const hr = hrAroundCaret(surface, range, event.key);
+  if (!hr) return false;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  removeHr(hr, surface);
+  return true;
+}
+
+/** Vditor only turns --- into an <hr> after Enter. Convert as soon as the line is a break. */
+function handleImmediateThematicBreak(root: HTMLElement) {
+  const surface = editorSurface(root);
+  if (!surface) return false;
+  const selection = document.getSelection();
+  if (!selection?.rangeCount || !selection.isCollapsed) return false;
+  const range = selection.getRangeAt(0);
+  if (!surface.contains(range.startContainer)) return false;
+  const block = thematicBreakBlock(range.startContainer, surface);
+  if (!block) return false;
+  replaceBlockWithHr(block);
+  return true;
+}
+
 /** Lute drops trailing empty blocks, so Enter at the document end is a no-op. */
 function handleEnterAtDocumentEnd(event: KeyboardEvent, root: HTMLElement) {
   if (event.key !== "Enter" || event.isComposing || event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) {
@@ -1032,6 +1306,15 @@ function handleEnterAtDocumentEnd(event: KeyboardEvent, root: HTMLElement) {
   }
 
   const content = lastContentBlock(surface);
+  if (content?.tagName === "HR" && (content.contains(range.startContainer) || caretAtEndOf(surface, range))) {
+    consumeEnter(event);
+    const paragraph = isEmptyParagraph(content.nextElementSibling)
+      ? content.nextElementSibling
+      : createEmptyParagraph();
+    if (paragraph !== content.nextElementSibling) content.after(paragraph);
+    placeCaretIn(paragraph);
+    return true;
+  }
   if (!content || !content.contains(range.endContainer) || !caretAtEndOf(content, range)) return false;
 
   consumeEnter(event);
@@ -1042,9 +1325,53 @@ function handleEnterAtDocumentEnd(event: KeyboardEvent, root: HTMLElement) {
   return true;
 }
 
+type ImportedEditorImage = { markdownPath: string; absolutePath: string };
+
+function editorDropPoint(position: { x: number; y: number }, mount: HTMLElement) {
+  const scale = window.devicePixelRatio || 1;
+  const editor = mount.closest(".editor") ?? mount;
+  const rect = editor.getBoundingClientRect();
+  for (const point of [
+    { x: position.x / scale, y: position.y / scale },
+    position,
+  ]) {
+    const inside = point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+    if (inside) return point;
+  }
+  if (mount.contains(document.activeElement)) return { x: rect.left + 8, y: rect.top + 8 };
+  return null;
+}
+
+function focusEditorAt(mount: HTMLElement, point: { x: number; y: number }) {
+  const surface = mount.querySelector<HTMLElement>(".vditor-ir, .vditor-wysiwyg, textarea");
+  surface?.focus();
+  const range = document.caretRangeFromPoint?.(point.x, point.y);
+  if (!range || !mount.contains(range.startContainer)) return;
+  const selection = document.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function isTauri() {
+  return "__TAURI_INTERNALS__" in window;
+}
+
+let lastNativeImageDrop = 0;
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取图片"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function HyperSpaceVditor({
   pageId,
   value,
+  projectPath = null,
+  notePath = null,
   nodes,
   bookmarks,
   readOnly,
@@ -1059,6 +1386,8 @@ export function HyperSpaceVditor({
   const instanceRef = useRef<Vditor | null>(null);
   const readyRef = useRef(false);
   const valueRef = useRef(value);
+  const projectPathRef = useRef(projectPath);
+  const notePathRef = useRef(notePath ?? "");
   const nodesRef = useRef(nodes);
   const bookmarksRef = useRef(bookmarks);
   const readOnlyRef = useRef(readOnly);
@@ -1069,12 +1398,15 @@ export function HyperSpaceVditor({
   const onHeadingRef = useRef(onActiveHeadingChange);
   const onCursorRef = useRef(onCursorChange);
   const applyingExternalRef = useRef(false);
+  const echoedMarkdownRef = useRef<string | null>(null);
   const rebuildOnceRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [rebuildKey, setRebuildKey] = useState(0);
   const [ready, setReady] = useState(false);
 
   valueRef.current = value;
+  projectPathRef.current = projectPath;
+  notePathRef.current = notePath ?? "";
   nodesRef.current = nodes;
   bookmarksRef.current = bookmarks;
   readOnlyRef.current = readOnly;
@@ -1090,6 +1422,7 @@ export function HyperSpaceVditor({
     if (!host) return;
     let disposed = false;
     let instance: Vditor | null = null;
+    echoedMarkdownRef.current = null;
     const cdn = vditorCdn();
     const mount = document.createElement("div");
     mount.className = "hyperspace-vditor__mount";
@@ -1112,7 +1445,47 @@ export function HyperSpaceVditor({
       if (disposed) return;
       refreshHyperSpaceEmbeds(mount, context);
       annotateHeadingElements(mount, valueRef.current);
+      rewriteEditorImages(mount, projectPathRef.current, notePathRef.current);
       ensureTrailingParagraph(mount);
+    };
+
+    const showEditorTip = (message: string) => {
+      const tip = instanceRef.current?.vditor.tip as { show?: (html: string) => void } | undefined;
+      tip?.show?.(message);
+    };
+
+    const insertImageMarkdown = (label: string, markdownPath: string) => {
+      const instance = instanceRef.current;
+      if (!instance || readOnlyRef.current) return;
+      instance.insertValue(`${markdownImage(label, markdownPath)}\n`);
+      mount.querySelectorAll(".vditor-ir__node--expand[data-type='img']").forEach((node) => {
+        node.classList.remove("vditor-ir__node--expand");
+      });
+      rewriteEditorImages(mount, projectPathRef.current, notePathRef.current);
+    };
+
+    const importImageFile = async (file: File) => {
+      if (!isTauri() || !projectPathRef.current) {
+        const dataUrl = await readFileAsDataUrl(file);
+        if (!dataUrl.startsWith("data:image/")) throw new Error("只能插入图片");
+        return { label: file.name, markdownPath: dataUrl };
+      }
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const saved = await invoke<ImportedEditorImage>("import_editor_image", {
+        fileName: file.name,
+        bytes,
+        noteRelativePath: notePathRef.current,
+      });
+      return { label: file.name, markdownPath: saved.markdownPath };
+    };
+
+    const importImagePath = async (sourcePath: string) => {
+      const saved = await invoke<ImportedEditorImage>("import_editor_image", {
+        sourcePath,
+        noteRelativePath: notePathRef.current,
+      });
+      const label = sourcePath.split(/[/\\]/).pop() ?? "image";
+      return { label, markdownPath: saved.markdownPath };
     };
 
     const reportCaret = () => {
@@ -1162,11 +1535,12 @@ export function HyperSpaceVditor({
           cache: { enable: false },
           cdn,
           toolbarConfig: { pin: true, hide: false },
-          fullscreen: { index: 200 },
-          toolbar: withLucideToolbarIcons([
+          toolbar: withOcticonsToolbarIcons([
             "headings", "bold", "italic", "strike", "|",
             "list", "ordered-list", "check", "quote", "|",
-            "code", "inline-code", "link", "table",
+            "code", "inline-code", "link",
+            // ⌘M is macOS Minimize. ⇧⌘T keeps insert-table off that chord.
+            { name: "table", hotkey: "⇧⌘T" },
             {
               name: "hyperspace-file",
               tip: "嵌入文件",
@@ -1181,7 +1555,7 @@ export function HyperSpaceVditor({
                 if (instanceRef.current) insertHyperSpaceEmbed(instanceRef.current, "folder", nodesRef.current);
               },
             },
-            "|", "undo", "redo", "edit-mode", "both", "preview", "outline", "fullscreen",
+            "|", "undo", "redo", "edit-mode", "both",
           ]),
           preview: {
             delay: 300,
@@ -1195,6 +1569,31 @@ export function HyperSpaceVditor({
             parse: () => refreshDerived(),
           },
           hint: { emojiPath: `${cdn}/dist/images/emoji` },
+          upload: {
+            accept: "image/*",
+            multiple: true,
+            handler: async (files) => {
+              if (Date.now() - lastNativeImageDrop < 1000) return null;
+              const images = files.filter((file) => file.type.startsWith("image/") || isImagePath(file.name));
+              if (!images.length) {
+                showEditorTip("只能插入图片");
+                return null;
+              }
+              let inserted = 0;
+              let failure = "";
+              for (const file of images) {
+                try {
+                  const image = await importImageFile(file);
+                  insertImageMarkdown(image.label, image.markdownPath);
+                  inserted += 1;
+                } catch (cause) {
+                  failure = cause instanceof Error ? cause.message : String(cause);
+                }
+              }
+              if (!inserted && failure) showEditorTip(failure);
+              return null;
+            },
+          },
           link: {
             isOpen: false,
             click: (element) => {
@@ -1220,7 +1619,6 @@ export function HyperSpaceVditor({
               /* setValue can throw before lute is fully ready */
             }
             refreshDerived();
-            installVditorContractIcon();
             decorateToolbar(mount);
             readyRef.current = true;
             setReady(true);
@@ -1231,11 +1629,13 @@ export function HyperSpaceVditor({
           },
           input: (markdown) => {
             if (disposed || !readyRef.current || applyingExternalRef.current) return;
+            markdown = restoreImageMarkdown(markdown);
             if (markdownEquals(markdown, valueRef.current)) {
               window.requestAnimationFrame(refreshDerived);
               return;
             }
             valueRef.current = markdown;
+            echoedMarkdownRef.current = markdown;
             onChangeRef.current(markdown);
             window.requestAnimationFrame(() => {
               refreshDerived();
@@ -1258,12 +1658,71 @@ export function HyperSpaceVditor({
 
     const onPointer = () => reportCaret();
     const onKey = () => reportCaret();
-    const onEnter = (event: KeyboardEvent) => {
+    const persistEditor = () => {
+      try {
+        let markdown = instanceRef.current?.getValue();
+        if (markdown != null) markdown = restoreImageMarkdown(markdown);
+        if (markdown != null && /^---\s*\n+---\s*$/.test(markdown.replaceAll(ZWSP, "").trim())) {
+          markdown = "---\n";
+        }
+        if (markdown != null && !markdownEquals(markdown, valueRef.current)) {
+          valueRef.current = markdown;
+          echoedMarkdownRef.current = markdown;
+          onChangeRef.current(markdown);
+        }
+      } catch {
+        /* lute can throw if the editor is mid-rebuild */
+      }
+      window.requestAnimationFrame(() => {
+        refreshDerived();
+        reportCaret();
+      });
+    };
+    const onEditorKeydown = (event: KeyboardEvent) => {
       if (readOnlyRef.current) return;
+      if (handleHrKeydown(event, mount)) {
+        persistEditor();
+        return;
+      }
       if (handleEnterAtDocumentEnd(event, mount)) reportCaret();
+    };
+    const syncThematicBreak = () => {
+      if (disposed || readOnlyRef.current) return;
+      if (!handleImmediateThematicBreak(mount)) return;
+      persistEditor();
+    };
+    const onThematicBreak = (event: Event) => {
+      if (readOnlyRef.current) return;
+      if (event instanceof InputEvent) {
+        if (event.isComposing) return;
+        if (event.inputType && !event.inputType.startsWith("insert")) return;
+      }
+      // After Vditor: a leading --- becomes empty yaml-front-matter, not <hr>.
+      queueMicrotask(syncThematicBreak);
+    };
+    const onThematicBreakKey = (event: KeyboardEvent) => {
+      onKey();
+      if (readOnlyRef.current || event.isComposing) return;
+      if (event.key !== "-" && event.key !== "*" && event.key !== "_") return;
+      queueMicrotask(syncThematicBreak);
     };
     const onClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('button[data-type="check"]')) {
+        window.requestAnimationFrame(() => {
+          if (disposed || readOnlyRef.current) return;
+          restoreTaskCaret(mount);
+          reportCaret();
+        });
+      }
+      const hr = target?.closest("hr");
+      if (hr instanceof HTMLElement && mount.contains(hr) && !readOnlyRef.current) {
+        const next = hr.nextElementSibling;
+        if (next instanceof HTMLElement) {
+          if (isEmptyParagraph(next)) placeCaretIn(next);
+          else placeCaretAtStart(next);
+        }
+      }
       const anchor = target?.closest("a[href]");
       if (!(anchor instanceof HTMLAnchorElement) || !mount.contains(anchor)) return;
       const href = anchor.getAttribute("href") ?? "";
@@ -1271,8 +1730,9 @@ export function HyperSpaceVditor({
       event.preventDefault();
       handleLink(href);
     };
-    mount.addEventListener("keydown", onEnter, true);
-    mount.addEventListener("keyup", onKey);
+    mount.addEventListener("keydown", onEditorKeydown, true);
+    mount.addEventListener("input", onThematicBreak);
+    mount.addEventListener("keyup", onThematicBreakKey);
     mount.addEventListener("mouseup", onPointer);
     mount.addEventListener("click", onClick);
     const removeSourceLineNumbers = installSourceLineNumbers(
@@ -1289,12 +1749,47 @@ export function HyperSpaceVditor({
     });
     popovers.observe(mount, { childList: true, subtree: true });
 
+    let unlistenDrop: (() => void) | undefined;
+    if (isTauri()) {
+      void import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
+        if (disposed) return;
+        return getCurrentWebview().onDragDropEvent((event) => {
+          if (disposed || event.payload.type !== "drop" || readOnlyRef.current) return;
+          const point = editorDropPoint(event.payload.position, mount);
+          if (!point) return;
+          const images = event.payload.paths.filter(isImagePath);
+          if (!images.length) return;
+          lastNativeImageDrop = Date.now();
+          focusEditorAt(mount, point);
+          void (async () => {
+            let failure = "";
+            let inserted = 0;
+            for (const path of images) {
+              try {
+                const image = await importImagePath(path);
+                insertImageMarkdown(image.label, image.markdownPath);
+                inserted += 1;
+              } catch (cause) {
+                failure = cause instanceof Error ? cause.message : String(cause);
+              }
+            }
+            if (!inserted && failure) showEditorTip(failure);
+          })();
+        }).then((stop) => {
+          if (disposed) stop();
+          else unlistenDrop = stop;
+        });
+      });
+    }
+
     return () => {
       disposed = true;
+      unlistenDrop?.();
       window.clearTimeout(failTimer);
       popovers.disconnect();
-      mount.removeEventListener("keydown", onEnter, true);
-      mount.removeEventListener("keyup", onKey);
+      mount.removeEventListener("keydown", onEditorKeydown, true);
+      mount.removeEventListener("input", onThematicBreak);
+      mount.removeEventListener("keyup", onThematicBreakKey);
       mount.removeEventListener("mouseup", onPointer);
       mount.removeEventListener("click", onClick);
       removeSourceLineNumbers();
@@ -1305,7 +1800,13 @@ export function HyperSpaceVditor({
   useEffect(() => {
     const instance = instanceRef.current;
     if (!readyRef.current || !instance) return;
-    if (markdownEquals(instance.getValue(), value)) return;
+    // Undo/redo and typing already updated the IR DOM. getValue() is a full
+    // Lute pass, and setValue(..., true) re-parses the document and clears
+    // the undo stack — that round-trip is the hitch after undo.
+    if (echoedMarkdownRef.current !== null && markdownEquals(echoedMarkdownRef.current, value)) {
+      return;
+    }
+    if (markdownEquals(restoreImageMarkdown(instance.getValue()), value)) return;
     applyingExternalRef.current = true;
     try {
       instance.setValue(value, true);
@@ -1322,7 +1823,10 @@ export function HyperSpaceVditor({
     const timer = window.setTimeout(() => {
       applyingExternalRef.current = false;
       const host = hostRef.current;
-      if (host) ensureTrailingParagraph(host);
+      if (host) {
+        rewriteEditorImages(host, projectPathRef.current, notePathRef.current);
+        ensureTrailingParagraph(host);
+      }
     }, 80);
     return () => window.clearTimeout(timer);
   }, [value]);
@@ -1332,6 +1836,7 @@ export function HyperSpaceVditor({
     if (!readyRef.current || !instance) return;
     if (readOnly) {
       valueRef.current = instance.getValue();
+      echoedMarkdownRef.current = valueRef.current;
       onChangeRef.current(valueRef.current);
       instance.disabled();
       return;

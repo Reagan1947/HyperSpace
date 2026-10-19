@@ -33,6 +33,13 @@ export function markdownEquals(left: string, right: string) {
   return left === right || normalize(left) === normalize(right);
 }
 
+/** Fields that a full workspace save rewrites. Typing and the open tab are not included. */
+export function workspaceStructureSignature(workspace: WorkspaceState) {
+  const nodes = workspace.nodes.map(nodeSignature).join("\n");
+  const tags = (workspace.tags ?? []).map((tag) => `${tag.id}\0${tag.name}`).join("\n");
+  return `${nodes}\n\n${tags}`;
+}
+
 export function dirtyMarkdownNodeIds(
   noteMarkdown: Record<string, string>,
   syncedMarkdown: Record<string, string>,
@@ -53,6 +60,14 @@ export function mergeScannedWorkspace(
 
   const dirty = new Set(dirtyNodeIds);
   const noteMarkdown = { ...scanned.noteMarkdown };
+  // A save round-trip trims trailing newlines. Keep the editor's exact string
+  // so that echo does not look like a new document and re-parse the IR DOM.
+  for (const id of Object.keys(noteMarkdown)) {
+    const currentMarkdown = current.noteMarkdown[id];
+    if (typeof currentMarkdown === "string" && markdownEquals(currentMarkdown, noteMarkdown[id] ?? "")) {
+      noteMarkdown[id] = currentMarkdown;
+    }
+  }
   for (const id of dirty) {
     if (!scannedIds.has(id)) continue;
     const currentMarkdown = current.noteMarkdown[id];
@@ -83,6 +98,60 @@ export const WORKSPACE_TREE_CHANGED_EVENT = "workspace-tree-changed";
 
 export function opensInWorkspace(node: ContentNode | undefined | null): node is ContentNode {
   return Boolean(node && node.kind !== "folder");
+}
+
+function treeOrderKey(node: ContentNode) {
+  return `${node.kind === "file" ? "1" : "0"}\0${(node.title || "").toLowerCase()}`;
+}
+
+function isDescendantOf(nodes: ContentNode[], nodeId: string, ancestorId: string) {
+  let current = nodes.find((item) => item.id === nodeId);
+  while (current?.parentId) {
+    if (current.parentId === ancestorId) return true;
+    const parentId = current.parentId;
+    current = nodes.find((item) => item.id === parentId);
+  }
+  return false;
+}
+
+function subtreeEndIndex(nodes: ContentNode[], id: string) {
+  const start = nodes.findIndex((item) => item.id === id);
+  if (start === -1) return nodes.length;
+  let end = start + 1;
+  while (end < nodes.length && isDescendantOf(nodes, nodes[end].id, id)) {
+    end += 1;
+  }
+  return end;
+}
+
+export function uniqueWorkspaceNodeId(id: string, nodes: ContentNode[]): string {
+  if (!id || !nodes.some((node) => node.id === id)) return id;
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `${id}-${index}`;
+    if (!nodes.some((node) => node.id === candidate)) return candidate;
+  }
+  return `${id}-new`;
+}
+
+export function insertWorkspaceNode(nodes: ContentNode[], node: ContentNode): ContentNode[] {
+  const siblings = nodes.filter((item) => item.parentId === node.parentId);
+  const insertBefore = siblings.find((sibling) => treeOrderKey(node) < treeOrderKey(sibling));
+  if (insertBefore) {
+    const index = nodes.findIndex((item) => item.id === insertBefore.id);
+    if (index === -1) return [...nodes, node];
+    return [...nodes.slice(0, index), node, ...nodes.slice(index)];
+  }
+
+  if (siblings.length === 0) {
+    if (!node.parentId) return [...nodes, node];
+    const parentIndex = nodes.findIndex((item) => item.id === node.parentId);
+    if (parentIndex === -1) return [...nodes, node];
+    return [...nodes.slice(0, parentIndex + 1), node, ...nodes.slice(parentIndex + 1)];
+  }
+
+  const lastSibling = siblings[siblings.length - 1];
+  const insertAt = subtreeEndIndex(nodes, lastSibling.id);
+  return [...nodes.slice(0, insertAt), node, ...nodes.slice(insertAt)];
 }
 
 export function pruneOpenTabs(openTabIds: string[], nodes: ContentNode[]) {

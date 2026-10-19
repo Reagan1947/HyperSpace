@@ -69,6 +69,7 @@ fn run(
         command.env("GIT_SSH_COMMAND", ssh_command);
     }
     command
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .map_err(|error| format!("Failed to run {}: {error}", program.display()))
 }
@@ -125,6 +126,9 @@ fn append_missing_lines(path: &Path, lines: &[&str]) -> Result<(), String> {
     if !next.is_empty() {
         next.push('\n');
     }
+    if next == current {
+        return Ok(());
+    }
     write_atomic(path, &next)
 }
 
@@ -138,6 +142,8 @@ pub fn ensure_project_support_files(project_path: &Path) -> Result<(), String> {
             ".hyperspace/tmp/",
             ".hyperspace/search-index.json",
             ".hyperspace/settings.local.json",
+            ".hyperspace/state.json",
+            ".hyperspace/documents/",
             ".hyperspace/workspace.json",
             ".hyperspace/workspace.json.*",
         ],
@@ -293,6 +299,33 @@ pub fn commit_all(
     Ok(repository_info(toolchain, project_path))
 }
 
+pub fn pull(
+    toolchain: &ResolvedGitToolchain,
+    project_path: &Path,
+) -> Result<GitRepositoryInfo, String> {
+    if !project_path.join(".git").exists() {
+        return Err("当前项目尚未启用 Git".into());
+    }
+    successful_output(
+        toolchain,
+        &toolchain.git_program,
+        &["pull", "--no-edit"],
+        project_path,
+    )?;
+    Ok(repository_info(toolchain, project_path))
+}
+
+pub fn push(
+    toolchain: &ResolvedGitToolchain,
+    project_path: &Path,
+) -> Result<GitRepositoryInfo, String> {
+    if !project_path.join(".git").exists() {
+        return Err("当前项目尚未启用 Git".into());
+    }
+    successful_output(toolchain, &toolchain.git_program, &["push"], project_path)?;
+    Ok(repository_info(toolchain, project_path))
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
@@ -402,6 +435,22 @@ pub fn import_pdf(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn project_support_files_ignore_local_metadata() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("hyperspace-ignore-{unique}"));
+        fs::create_dir_all(&project).expect("create project");
+        ensure_project_support_files(&project).expect("write support files");
+        let ignore = fs::read_to_string(project.join(".gitignore")).expect("read gitignore");
+        assert!(ignore.contains(".hyperspace/state.json"));
+        assert!(ignore.contains(".hyperspace/documents/"));
+        assert!(ignore.contains(".hyperspace/search-index.json"));
+        fs::remove_dir_all(project).expect("remove temp project");
+    }
 
     #[test]
     fn status_parser_reads_untracked_and_modified_entries() {

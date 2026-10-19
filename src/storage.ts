@@ -154,6 +154,23 @@ export async function saveWorkspace(workspace: WorkspaceState): Promise<void> {
   localStorage.setItem(STORAGE_KEY, serialized);
 }
 
+export interface MarkdownNoteSave {
+  id: string;
+  kind: "page" | "file";
+  title: string;
+  relativePath: string;
+  body: string;
+}
+
+/** Writes just the dirty notes. Does not rewrite the rest of the workspace. */
+export async function saveMarkdownNotes(
+  notes: MarkdownNoteSave[],
+  selectedNodeId?: string,
+): Promise<void> {
+  if (!isTauri() || (!notes.length && !selectedNodeId)) return;
+  await invoke("save_markdown_notes", { notes, selectedNodeId });
+}
+
 export async function getDefaultProjectsDirectory(): Promise<string> {
   if (!isTauri()) {
     return "";
@@ -212,6 +229,16 @@ export async function getGitRepositoryInfo(): Promise<GitRepositoryInfo> {
 export async function commitAll(message: string): Promise<GitRepositoryInfo> {
   if (!isTauri()) throw new Error("Git 提交仅在桌面应用中可用");
   return invoke<GitRepositoryInfo>("git_commit_all", { message });
+}
+
+export async function gitPull(): Promise<GitRepositoryInfo> {
+  if (!isTauri()) throw new Error("Git 拉取仅在桌面应用中可用");
+  return invoke<GitRepositoryInfo>("git_pull");
+}
+
+export async function gitPush(): Promise<GitRepositoryInfo> {
+  if (!isTauri()) throw new Error("Git 推送仅在桌面应用中可用");
+  return invoke<GitRepositoryInfo>("git_push");
 }
 
 export async function searchWorkspace(query: string, limit = 20): Promise<WorkspaceSearchResult[]> {

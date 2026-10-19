@@ -1,26 +1,29 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import chatAiIcon from "./assets/icons/chat-ai-line.svg";
 import folderMenuIcon from "./assets/icons/folder-menu.svg";
 import projectIcon from "./assets/icons/project.svg";
 import structureOverviewIcon from "./assets/icons/structure-overview.svg";
 import {
   Bell,
   Bookmark,
-  Bot,
   Check,
   ChevronDown,
   ChevronRight,
+  ArrowDownToLine,
+  ArrowUpFromLine,
   Cloud,
   File,
   Files,
   FileSpreadsheet,
   FileText,
-  FileUp,
   Folder,
   FoldVertical,
   GitBranch,
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
+  History,
   ListTodo,
   ListTree,
   LocateFixed,
@@ -33,7 +36,6 @@ import {
   RefreshCw,
   Search,
   Server,
-  Sparkles,
   Tag,
   TerminalSquare,
   UnfoldVertical,
@@ -45,6 +47,7 @@ import type { FileTreeHandle } from "./FileTree";
 import { headingPath, headingSiblings, parseMarkdownHeadings, type MarkdownHeading } from "./markdownNavigation";
 import { TerminalPanel } from "./TerminalPanel";
 import { HyperSpaceVditor } from "./VditorEditor";
+import { AiChatPanel, AiHistoryManager } from "./AiChatPanel";
 import { PROJECT_CREATED_EVENT, type ProjectCreatedPayload } from "./NewProjectDialog";
 import {
   commitAll,
@@ -52,12 +55,14 @@ import {
   deleteWorkspaceEntries,
   getCurrentProject,
   getGitRepositoryInfo,
-  importPdf,
+  gitPull,
+  gitPush,
   loadWorkspace,
   moveWorkspaceEntry,
   openProject,
   projectNameFromPath,
   renameWorkspaceEntry,
+  saveMarkdownNotes,
   saveWorkspace,
   searchWorkspace,
   type GitRepositoryInfo,
@@ -66,11 +71,14 @@ import {
 import type { ContentNode, MarkdownBookmark, MarkerColor, TagDefinition, WorkspaceState } from "./types";
 import {
   dirtyMarkdownNodeIds,
+  insertWorkspaceNode,
   markdownEquals,
   mergeScannedWorkspace,
   opensInWorkspace,
   pruneOpenTabs,
   resolveMoveDestination,
+  uniqueWorkspaceNodeId,
+  workspaceStructureSignature,
   WORKSPACE_TREE_CHANGED_EVENT,
 } from "./workspaceSync";
 import {
@@ -99,13 +107,6 @@ const emptyGitInfo: GitRepositoryInfo = {
   changes: [],
   history: [],
 };
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
 
 function NodeIcon({ node, size = 16 }: { node: ContentNode; size?: number }) {
   if (node.kind === "folder") return <Folder size={size} strokeWidth={1.8} />;
@@ -479,7 +480,7 @@ function RightActivityRail({
         <Files size={18} strokeWidth={1.5} /><span>Referenced Files</span>
       </button>
       <button className={active === "ai" ? "active" : ""} onClick={() => onSelect("ai")} aria-label="AI Chat" aria-pressed={active === "ai"}>
-        <Bot size={18} strokeWidth={1.5} /><span>AI Chat</span>
+        <img className="activity-menu-icon" src={chatAiIcon} alt="" aria-hidden="true" /><span>AI Chat</span>
       </button>
     </nav>
   );
@@ -488,6 +489,7 @@ function RightActivityRail({
 function NoteView({
   node,
   workspace,
+  projectPath,
   readOnly,
   onMarkdownChange,
   bookmarks,
@@ -498,6 +500,7 @@ function NoteView({
 }: {
   node: ContentNode;
   workspace: WorkspaceState;
+  projectPath: string | null;
   readOnly: boolean;
   onMarkdownChange: (markdown: string) => void;
   bookmarks: MarkdownBookmark[];
@@ -512,6 +515,8 @@ function NoteView({
         <HyperSpaceVditor
           key={node.id}
           pageId={node.id}
+          projectPath={projectPath}
+          notePath={node.localPath ?? ""}
           nodes={workspace.nodes}
           bookmarks={bookmarks}
           value={workspace.noteMarkdown[node.id] ?? ""}
@@ -701,68 +706,107 @@ function focusCanvasBlock(headingId: string) {
 }
 
 
+const AI_CHAT_TAB_ID = "ai-chat";
+const TAB_MIN_WIDTH = 96;
+const TAB_OVERFLOW_BTN_WIDTH = 22;
+const TAB_ACTION_WIDTH = 24;
+const TAB_TRAILING_PAD = 2;
+
+function measuredTabWidth(element: HTMLElement | undefined, fallback = TAB_MIN_WIDTH) {
+  const width = element?.offsetWidth ?? 0;
+  return width > 0 ? width : fallback;
+}
+
+function overflowTabLayout(ids: string[], widths: number[], available: number, activeId: string) {
+  const widthAt = (index: number) => widths[index] ?? TAB_MIN_WIDTH;
+  const total = widths.reduce((sum, width) => sum + width, 0);
+  if (total <= available + 0.5) return { visible: ids, hidden: [] as string[] };
+
+  const packFrom = (start: number) => {
+    let used = 0;
+    const visible: string[] = [];
+    for (let index = start; index < ids.length; index += 1) {
+      if (used >= available - 0.5) break;
+      visible.push(ids[index]);
+      used += widthAt(index);
+    }
+    const visibleSet = new Set(visible);
+    return { visible, hidden: ids.filter((id) => !visibleSet.has(id)) };
+  };
+
+  const fromLeft = packFrom(0);
+  const activeIndex = ids.indexOf(activeId);
+  if (activeIndex <= 0 || !fromLeft.hidden.includes(activeId)) return fromLeft;
+
+  let start = activeIndex;
+  let used = widthAt(activeIndex);
+  for (let index = activeIndex - 1; index >= 0; index -= 1) {
+    const next = used + widthAt(index);
+    if (next - widthAt(activeIndex) >= available - 0.5) break;
+    used = next;
+    start = index;
+  }
+  return packFrom(start);
+}
+
+type TabCloseSide = "left" | "right" | "others";
+
+function clampTabMenuPosition(x: number, y: number) {
+  const pad = 8;
+  const width = 152;
+  const height = 104;
+  return {
+    x: Math.max(pad, Math.min(x, window.innerWidth - width - pad)),
+    y: Math.max(pad, Math.min(y, window.innerHeight - height - pad)),
+  };
+}
+
 function WorkspaceTabBar({
   tabs,
   activeId,
   onSelect,
   onClose,
+  onCloseAround,
   onOpenInfo,
+  aiTab,
 }: {
   tabs: ContentNode[];
   activeId: string;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  onCloseAround: (id: string, side: TabCloseSide) => void;
   onOpenInfo: () => void;
+  aiTab?: { active: boolean; onSelect: () => void; onClose: () => void };
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const measureRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const overflowRef = useRef<HTMLDivElement>(null);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const tabMenuRef = useRef<HTMLDivElement>(null);
+  const hasAiTab = Boolean(aiTab);
+  const overflowing = hiddenIds.length > 0;
 
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     const measure = () => {
-      const actionWidth = 36;
-      const spacerMin = 20;
-      const overflowBtnWidth = 28;
-      const widths = tabs.map((tab) => measureRefs.current.get(tab.id)?.offsetWidth ?? 120);
+      const ids = [
+        ...tabs.map((tab) => tab.id),
+        ...(hasAiTab ? [AI_CHAT_TAB_ID] : []),
+      ];
+      const widths = ids.map((id) => (
+        id === AI_CHAT_TAB_ID
+          ? measuredTabWidth(measureRefs.current.get(id), 120)
+          : measuredTabWidth(measureRefs.current.get(id))
+      ));
       const total = widths.reduce((sum, width) => sum + width, 0);
-      const baseAvailable = Math.max(0, container.clientWidth - actionWidth - spacerMin);
-      const needsOverflow = total > baseAvailable + 0.5;
-      const available = Math.max(0, baseAvailable - (needsOverflow ? overflowBtnWidth : 0));
-
-      const ids = tabs.map((tab) => tab.id);
-      const widthOf = Object.fromEntries(ids.map((id, index) => [id, widths[index]]));
-      let visible: string[] = [];
-      let used = 0;
-      for (const id of ids) {
-        const width = widthOf[id] ?? 120;
-        if (used + width <= available + 0.5) {
-          visible.push(id);
-          used += width;
-        } else {
-          break;
-        }
-      }
-
-      if (activeId && ids.includes(activeId) && !visible.includes(activeId)) {
-        visible.push(activeId);
-        used += widthOf[activeId] ?? 120;
-        while (visible.length > 1 && used > available + 0.5) {
-          const removed = visible.shift();
-          if (!removed || removed === activeId) {
-            if (removed) visible.unshift(removed);
-            break;
-          }
-          used -= widthOf[removed] ?? 120;
-        }
-        visible = ids.filter((id) => visible.includes(id));
-      }
-
-      const nextHidden = ids.filter((id) => !visible.includes(id));
+      const fullWidth = Math.max(0, container.clientWidth - TAB_ACTION_WIDTH - TAB_TRAILING_PAD);
+      const needsOverflow = total > fullWidth + 0.5;
+      const available = Math.max(0, fullWidth - (needsOverflow ? TAB_OVERFLOW_BTN_WIDTH : 0));
+      const nextHidden = overflowTabLayout(ids, widths, available, activeId).hidden;
       setHiddenIds((current) => {
         if (current.length === nextHidden.length && current.every((id, index) => id === nextHidden[index])) {
           return current;
@@ -775,7 +819,7 @@ function WorkspaceTabBar({
     const observer = new ResizeObserver(measure);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [tabs, activeId]);
+  }, [tabs, activeId, hasAiTab]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -795,16 +839,103 @@ function WorkspaceTabBar({
 
   useEffect(() => {
     setMenuOpen(false);
-  }, [activeId, tabs.length]);
+    setTabMenu(null);
+  }, [activeId, tabs.length, hasAiTab]);
+
+  useEffect(() => {
+    if (!tabMenu) return;
+    const close = (event: MouseEvent) => {
+      if (tabMenuRef.current?.contains(event.target as Node)) return;
+      setTabMenu(null);
+    };
+    const closeOnScroll = () => setTabMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTabMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", closeOnScroll, true);
+    window.addEventListener("resize", closeOnScroll);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", closeOnScroll, true);
+      window.removeEventListener("resize", closeOnScroll);
+    };
+  }, [tabMenu]);
 
   const hiddenSet = useMemo(() => new Set(hiddenIds), [hiddenIds]);
   const hiddenTabs = useMemo(
     () => tabs.filter((tab) => hiddenSet.has(tab.id)),
     [tabs, hiddenSet],
   );
+  const hiddenAiTab = Boolean(aiTab) && hiddenSet.has(AI_CHAT_TAB_ID);
+  const tabById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
+  const visibleIds = useMemo(() => {
+    const ids = [
+      ...tabs.map((tab) => tab.id),
+      ...(hasAiTab ? [AI_CHAT_TAB_ID] : []),
+    ];
+    return ids.filter((id) => !hiddenSet.has(id));
+  }, [tabs, hasAiTab, hiddenSet]);
+
+  const orderedTabIds = useMemo(() => [
+    ...tabs.map((tab) => tab.id),
+    ...(hasAiTab ? [AI_CHAT_TAB_ID] : []),
+  ], [tabs, hasAiTab]);
+  const tabMenuIndex = tabMenu ? orderedTabIds.indexOf(tabMenu.id) : -1;
+  const canCloseLeft = tabMenuIndex > 0;
+  const canCloseRight = tabMenuIndex >= 0 && tabMenuIndex < orderedTabIds.length - 1;
+  const canCloseOthers = orderedTabIds.length > 1;
+
+  function openTabMenu(event: React.MouseEvent, id: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const next = clampTabMenuPosition(event.clientX, event.clientY);
+    setMenuOpen(false);
+    setTabMenu({ id, x: next.x, y: next.y });
+  }
+
+  function runTabMenuAction(side: TabCloseSide) {
+    if (!tabMenu) return;
+    const id = tabMenu.id;
+    setTabMenu(null);
+    onCloseAround(id, side);
+  }
+
+  function renderAiTab(key?: string) {
+    if (!aiTab) return null;
+    return (
+      <button
+        key={key}
+        role="tab"
+        type="button"
+        aria-selected={aiTab.active}
+        className={`document-tab ai-workspace-tab ${aiTab.active ? "active" : ""}`}
+        onClick={aiTab.onSelect}
+        onContextMenu={(event) => openTabMenu(event, AI_CHAT_TAB_ID)}
+      >
+        <img src={chatAiIcon} alt="" aria-hidden="true" />
+        <span>AI Chat</span>
+        <i
+          role="button"
+          aria-label="关闭 AI Chat"
+          tabIndex={0}
+          onClick={(event) => { event.stopPropagation(); aiTab.onClose(); }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              aiTab.onClose();
+            }
+          }}
+        ><X size={11} /></i>
+      </button>
+    );
+  }
 
   return (
-    <div className="workspace-tabs" ref={containerRef} role="tablist" aria-label="打开的页面">
+    <div className={`workspace-tabs${overflowing ? " is-overflowing" : ""}`} ref={containerRef} role="tablist" aria-label="打开的页面">
       <div className="workspace-tabs-measure" aria-hidden="true">
         {tabs.map((tab) => (
           <button
@@ -822,85 +953,139 @@ function WorkspaceTabBar({
             <i><X size={11} /></i>
           </button>
         ))}
+        {aiTab && (
+          <button
+            ref={(element) => {
+              if (element) measureRefs.current.set(AI_CHAT_TAB_ID, element);
+              else measureRefs.current.delete(AI_CHAT_TAB_ID);
+            }}
+            className="document-tab ai-workspace-tab"
+            tabIndex={-1}
+            type="button"
+          >
+            <img src={chatAiIcon} alt="" aria-hidden="true" />
+            <span>AI Chat</span>
+            <i><X size={11} /></i>
+          </button>
+        )}
       </div>
 
-      {tabs.map((tab) => {
-        if (hiddenSet.has(tab.id)) return null;
-        return (
-          <button
-            key={tab.id}
-            role="tab"
-            type="button"
-            aria-selected={tab.id === activeId}
-            className={`document-tab ${tab.id === activeId ? "active" : ""}`}
-            onClick={() => onSelect(tab.id)}
-          >
-            <FileNodeIcon node={tab} />
-            <span>{tab.title}</span>
-            <i
-              role="button"
-              aria-label={`关闭 ${tab.title}`}
-              tabIndex={0}
-              onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onClose(tab.id);
-                }
-              }}
-            ><X size={11} /></i>
-          </button>
-        );
-      })}
+      <div className="workspace-tabs-list">
+        {visibleIds.map((id) => {
+          if (id === AI_CHAT_TAB_ID) return renderAiTab(id);
+          const tab = tabById.get(id);
+          if (!tab) return null;
+          return (
+            <button
+              key={tab.id}
+              role="tab"
+              type="button"
+              aria-selected={!aiTab?.active && tab.id === activeId}
+              className={`document-tab ${!aiTab?.active && tab.id === activeId ? "active" : ""}`}
+              onClick={() => onSelect(tab.id)}
+              onContextMenu={(event) => openTabMenu(event, tab.id)}
+            >
+              <FileNodeIcon node={tab} />
+              <span>{tab.title}</span>
+              <i
+                role="button"
+                aria-label={`关闭 ${tab.title}`}
+                tabIndex={0}
+                onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onClose(tab.id);
+                  }
+                }}
+              ><X size={11} /></i>
+            </button>
+          );
+        })}
+      </div>
 
-      <div className="tabbar-spacer" data-tauri-drag-region />
+      {!overflowing && <div className="tabbar-spacer" data-tauri-drag-region />}
 
-      {hiddenTabs.length > 0 && (
-        <div className="tab-overflow" ref={overflowRef}>
-          <button
-            type="button"
-            className={`tab-overflow-button ${menuOpen ? "open" : ""}`}
-            aria-label="更多页签"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((current) => !current)}
-          >
-            <ChevronDown size={14} />
-          </button>
-          {menuOpen && (
-            <div className="tab-overflow-menu" role="menu" aria-label="被隐藏的页签">
-              {hiddenTabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="menuitem"
-                  className={tab.id === activeId ? "active" : ""}
-                  onClick={() => {
-                    onSelect(tab.id);
-                    setMenuOpen(false);
-                  }}
-                >
-                  <FileNodeIcon node={tab} />
-                  <span>{tab.title}</span>
-                  <i
-                    role="button"
-                    aria-label={`关闭 ${tab.title}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onClose(tab.id);
+      <div className={`workspace-tabs-trailing${overflowing ? " is-covering" : ""}`}>
+        {overflowing && (
+          <div className="tab-overflow" ref={overflowRef}>
+            <button
+              type="button"
+              className={`tab-overflow-button ${menuOpen ? "open" : ""}`}
+              aria-label="更多页签"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((current) => !current)}
+            >
+              <ChevronDown size={14} />
+            </button>
+            {menuOpen && (
+              <div className="tab-overflow-menu" role="menu" aria-label="被隐藏的页签">
+                {hiddenTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="menuitem"
+                    className={!aiTab?.active && tab.id === activeId ? "active" : ""}
+                    onClick={() => {
+                      onSelect(tab.id);
+                      setMenuOpen(false);
                     }}
-                  ><X size={12} /></i>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+                    onContextMenu={(event) => openTabMenu(event, tab.id)}
+                  >
+                    <FileNodeIcon node={tab} />
+                    <span>{tab.title}</span>
+                    <i
+                      role="button"
+                      aria-label={`关闭 ${tab.title}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onClose(tab.id);
+                      }}
+                    ><X size={12} /></i>
+                  </button>
+                ))}
+                {hiddenAiTab && aiTab && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={aiTab.active ? "active" : ""}
+                    onClick={() => {
+                      aiTab.onSelect();
+                      setMenuOpen(false);
+                    }}
+                    onContextMenu={(event) => openTabMenu(event, AI_CHAT_TAB_ID)}
+                  >
+                    <img src={chatAiIcon} alt="" aria-hidden="true" />
+                    <span>AI Chat</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
-      <button type="button" className="tabbar-action" aria-label="更多操作" onClick={onOpenInfo}>
-        <MoreVertical size={16} />
-      </button>
+        <button type="button" className="tabbar-action" aria-label="更多操作" onClick={onOpenInfo}>
+          <MoreVertical size={14} />
+        </button>
+      </div>
+      {tabMenu && createPortal(
+        <div
+          ref={tabMenuRef}
+          className="tree-context-menu is-pointer tab-context-menu"
+          role="menu"
+          aria-label="页签操作"
+          style={{ top: tabMenu.y, left: tabMenu.x }}
+          onMouseDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button type="button" role="menuitem" disabled={!canCloseLeft} onClick={() => runTabMenuAction("left")}>关闭左侧标签</button>
+          <button type="button" role="menuitem" disabled={!canCloseRight} onClick={() => runTabMenuAction("right")}>关闭右侧标签</button>
+          <button type="button" role="menuitem" disabled={!canCloseOthers} onClick={() => runTabMenuAction("others")}>关闭其他标签</button>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -1073,6 +1258,8 @@ function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(cloneInitial);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("loading");
   const [rightTool, setRightTool] = useState<RightTool | null>(null);
+  const [aiWorkspaceMode, setAiWorkspaceMode] = useState(false);
+  const [aiTabActive, setAiTabActive] = useState(false);
   const [bottomTool, setBottomTool] = useState<BottomTool | null>(null);
   const [secondaryBottomTool, setSecondaryBottomTool] = useState<SecondaryBottomTool | null>(null);
   const [query, setQuery] = useState("");
@@ -1082,6 +1269,7 @@ function App() {
   const [primaryLeftTool, setPrimaryLeftTool] = useState<PrimaryLeftTool | null>("project");
   const [secondaryLeftTool, setSecondaryLeftTool] = useState<SecondaryLeftTool | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(316);
+  const [rightPanelWidth, setRightPanelWidth] = useState(360);
   const [openTabIds, setOpenTabIds] = useState<string[]>([initialWorkspace.selectedNodeId]);
   const [treeSelectedId, setTreeSelectedId] = useState(initialWorkspace.selectedNodeId);
   const [pendingRenameId, setPendingRenameId] = useState<string | null>(null);
@@ -1090,22 +1278,51 @@ function App() {
   const [gitLoading, setGitLoading] = useState(false);
   const [gitError, setGitError] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [gitMenu, setGitMenu] = useState<null | "commit" | "history">(null);
+  const gitToolbarRef = useRef<HTMLDivElement>(null);
   const [indexedSearchResults, setIndexedSearchResults] = useState<WorkspaceSearchResult[] | null>(null);
   const hydrated = useRef(false);
   const syncedMarkdownRef = useRef<Record<string, string>>({});
   const syncedReadyRef = useRef(false);
   const saveGenerationRef = useRef(0);
+  const saveChainRef = useRef(Promise.resolve());
+  const schedulePersistRef = useRef<() => void>(() => {});
+  const noteEditEpochRef = useRef<Record<string, number>>({});
+  const noteSavedEpochRef = useRef<Record<string, number>>({});
+  const savedStructureRef = useRef("");
+  const savedSelectionRef = useRef("");
+  const structureReadyRef = useRef(false);
   const workspaceRef = useRef(workspace);
+  const projectPathRef = useRef(projectPath);
   workspaceRef.current = workspace;
+  projectPathRef.current = projectPath;
 
   function captureSyncedMarkdown(markdown: Record<string, string>) {
     syncedMarkdownRef.current = { ...markdown };
     syncedReadyRef.current = true;
   }
 
+  function acceptLoadedWorkspace(next: WorkspaceState) {
+    captureSyncedMarkdown(next.noteMarkdown);
+    noteEditEpochRef.current = {};
+    noteSavedEpochRef.current = {};
+    savedStructureRef.current = workspaceStructureSignature(next);
+    savedSelectionRef.current = next.selectedNodeId;
+    structureReadyRef.current = true;
+  }
+
+  function noteHasUnackedEdit(id: string) {
+    return (noteEditEpochRef.current[id] ?? 0) !== (noteSavedEpochRef.current[id] ?? 0);
+  }
+
   function currentDirtyMarkdownIds(noteMarkdown: Record<string, string>) {
-    if (!syncedReadyRef.current) return [];
-    return dirtyMarkdownNodeIds(noteMarkdown, syncedMarkdownRef.current);
+    const dirty = new Set(
+      syncedReadyRef.current ? dirtyMarkdownNodeIds(noteMarkdown, syncedMarkdownRef.current) : [],
+    );
+    for (const id of Object.keys(noteEditEpochRef.current)) {
+      if (noteHasUnackedEdit(id) && id in noteMarkdown) dirty.add(id);
+    }
+    return [...dirty];
   }
 
   useEffect(() => {
@@ -1119,7 +1336,7 @@ function App() {
           const opened = await openProject(path).catch(() => null);
           if (cancelled) return;
           if (opened) {
-            captureSyncedMarkdown(opened.noteMarkdown);
+            acceptLoadedWorkspace(opened);
             setWorkspace(opened);
             setTreeSelectedId(opened.selectedNodeId);
             setOpenTabIds(pruneOpenTabs([opened.selectedNodeId], opened.nodes));
@@ -1129,13 +1346,18 @@ function App() {
         const stored = await loadWorkspace();
         if (cancelled) return;
         if (stored) {
-          captureSyncedMarkdown(stored.noteMarkdown);
+          acceptLoadedWorkspace(stored);
           setWorkspace(stored);
           setTreeSelectedId(stored.selectedNodeId);
           setOpenTabIds(pruneOpenTabs([stored.selectedNodeId], stored.nodes));
         }
       } finally {
         if (!cancelled) {
+          if (!structureReadyRef.current) {
+            savedStructureRef.current = workspaceStructureSignature(workspaceRef.current);
+            savedSelectionRef.current = workspaceRef.current.selectedNodeId;
+            structureReadyRef.current = true;
+          }
           hydrated.current = true;
           setSyncStatus(navigator.onLine ? "saved" : "offline");
         }
@@ -1297,24 +1519,139 @@ function App() {
     });
   }, [tagSyncKey]);
 
-  useEffect(() => {
-    if (!hydrated.current) return;
+  function acknowledgeSavedNotes(
+    markdown: Record<string, string>,
+    epochSnapshot: Record<string, number>,
+  ) {
+    const synced = { ...syncedMarkdownRef.current };
+    for (const [id, body] of Object.entries(markdown)) {
+      if ((noteEditEpochRef.current[id] ?? 0) !== (epochSnapshot[id] ?? 0)) continue;
+      noteSavedEpochRef.current[id] = epochSnapshot[id] ?? 0;
+      synced[id] = body;
+    }
+    for (const id of Object.keys(synced)) {
+      if (id in markdown) continue;
+      if ((noteEditEpochRef.current[id] ?? 0) !== (epochSnapshot[id] ?? 0)) continue;
+      delete synced[id];
+      delete noteSavedEpochRef.current[id];
+      delete noteEditEpochRef.current[id];
+    }
+    captureSyncedMarkdown(synced);
+  }
+
+  async function writeStructure(generation: number) {
+    const snapshot = workspaceRef.current;
+    const signature = workspaceStructureSignature(snapshot);
+    const epochSnapshot = { ...noteEditEpochRef.current };
+    const markdownSnapshot = snapshot.noteMarkdown;
+    await saveWorkspace({ ...snapshot, lastSavedAt: new Date().toISOString() });
+    if (saveGenerationRef.current !== generation) return;
+    savedStructureRef.current = signature;
+    savedSelectionRef.current = snapshot.selectedNodeId;
+    acknowledgeSavedNotes(markdownSnapshot, epochSnapshot);
+  }
+
+  async function writeNotes(generation: number) {
+    const current = workspaceRef.current;
+    const epochSnapshot = { ...noteEditEpochRef.current };
+    const notes = currentDirtyMarkdownIds(current.noteMarkdown).flatMap((id) => {
+      const node = current.nodes.find((item) => item.id === id);
+      if (!node || !isMarkdownDocument(node) || node.kind === "folder") return [];
+      if (node.kind === "file" && !node.localPath) return [];
+      return [{
+        id,
+        kind: node.kind,
+        title: node.title,
+        relativePath: node.localPath ?? "",
+        body: current.noteMarkdown[id] ?? "",
+      }];
+    });
+    if (!notes.length) return;
+    await saveMarkdownNotes(notes, current.selectedNodeId);
+    if (saveGenerationRef.current !== generation) return;
+    savedSelectionRef.current = current.selectedNodeId;
+    const synced = { ...syncedMarkdownRef.current };
+    for (const note of notes) {
+      if ((noteEditEpochRef.current[note.id] ?? 0) !== (epochSnapshot[note.id] ?? 0)) continue;
+      noteSavedEpochRef.current[note.id] = epochSnapshot[note.id] ?? 0;
+      synced[note.id] = note.body;
+    }
+    captureSyncedMarkdown(synced);
+  }
+
+  async function writeSelection(generation: number) {
+    const selectedNodeId = workspaceRef.current.selectedNodeId;
+    if (!selectedNodeId || selectedNodeId === savedSelectionRef.current) return;
+    await saveMarkdownNotes([], selectedNodeId);
+    if (saveGenerationRef.current !== generation) return;
+    savedSelectionRef.current = selectedNodeId;
+  }
+
+  async function persistGeneration(generation: number) {
+    if (saveGenerationRef.current !== generation) return;
+    const current = workspaceRef.current;
+    const structureChanged = workspaceStructureSignature(current) !== savedStructureRef.current;
+    const dirty = currentDirtyMarkdownIds(current.noteMarkdown).length > 0;
+    const selectionChanged = current.selectedNodeId !== savedSelectionRef.current;
+    if (!structureChanged && !dirty && !selectionChanged) return;
+    const incremental = Boolean(projectPathRef.current) && "__TAURI_INTERNALS__" in window;
+    const quiet = !structureChanged && !dirty;
+    if (!quiet) startTransition(() => setSyncStatus(navigator.onLine ? "saving" : "offline"));
+    try {
+      if (structureChanged || (!incremental && (dirty || selectionChanged))) await writeStructure(generation);
+      if (incremental && dirty) await writeNotes(generation);
+      if (incremental && workspaceRef.current.selectedNodeId !== savedSelectionRef.current) {
+        await writeSelection(generation);
+      }
+      if (!quiet && saveGenerationRef.current === generation) {
+        startTransition(() => setSyncStatus(navigator.onLine ? "saved" : "offline"));
+      }
+    } catch {
+      if (saveGenerationRef.current === generation) {
+        startTransition(() => setSyncStatus("offline"));
+      }
+    }
+  }
+
+  function schedulePersist() {
+    const current = workspaceRef.current;
+    const structureChanged = workspaceStructureSignature(current) !== savedStructureRef.current;
+    const dirty = currentDirtyMarkdownIds(current.noteMarkdown).length > 0;
+    const selectionChanged = current.selectedNodeId !== savedSelectionRef.current;
+    if (!hydrated.current || (!structureChanged && !dirty && !selectionChanged)) return;
     const generation = ++saveGenerationRef.current;
-    const snapshot = workspace;
-    setSyncStatus(navigator.onLine ? "saving" : "offline");
-    const timer = window.setTimeout(() => {
-      void saveWorkspace({ ...snapshot, lastSavedAt: new Date().toISOString() })
-        .then(() => {
-          if (saveGenerationRef.current !== generation) return;
-          captureSyncedMarkdown(snapshot.noteMarkdown);
-          setSyncStatus(navigator.onLine ? "saved" : "offline");
-        })
-        .catch(() => {
-          if (saveGenerationRef.current === generation) setSyncStatus("offline");
-        });
-    }, 500);
+    const run = saveChainRef.current.then(
+      () => persistGeneration(generation),
+      () => persistGeneration(generation),
+    );
+    saveChainRef.current = run.then(() => undefined, () => undefined);
+  }
+  schedulePersistRef.current = schedulePersist;
+
+  useEffect(() => {
+    if (!hydrated.current || !structureReadyRef.current) return;
+    const structureChanged = workspaceStructureSignature(workspace) !== savedStructureRef.current;
+    const dirty = currentDirtyMarkdownIds(workspace.noteMarkdown).length > 0;
+    const selectionChanged = workspace.selectedNodeId !== savedSelectionRef.current;
+    if (!structureChanged && !dirty && !selectionChanged) return;
+    // Idle longer while typing. A newline used to flush a full save 500ms later, on the UI thread.
+    const delay = structureChanged ? 800 : dirty ? 1600 : 1200;
+    const timer = window.setTimeout(() => schedulePersistRef.current(), delay);
     return () => window.clearTimeout(timer);
   }, [workspace]);
+
+  useEffect(() => {
+    const flush = () => schedulePersistRef.current();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("blur", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   useEffect(() => {
     if (!projectPath || !("__TAURI_INTERNALS__" in window)) {
@@ -1334,6 +1671,22 @@ function App() {
       .finally(() => { if (!cancelled) setGitLoading(false); });
     return () => { cancelled = true; };
   }, [projectPath, primaryLeftTool, secondaryBottomTool]);
+
+  useEffect(() => {
+    if (!gitMenu) return;
+    const close = (event: PointerEvent) => {
+      if (!gitToolbarRef.current?.contains(event.target as Node)) setGitMenu(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setGitMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [gitMenu]);
 
   useEffect(() => {
     const normalized = query.trim();
@@ -1451,6 +1804,21 @@ function App() {
     setRightTool((current) => current === tool ? null : tool);
   }
 
+  function openAiWorkspaceTab() {
+    setAiWorkspaceMode(true);
+    setAiTabActive(true);
+  }
+
+  function closeAiWorkspaceTab() {
+    setAiWorkspaceMode(false);
+    setAiTabActive(false);
+  }
+
+  function restoreAiToSidebar() {
+    closeAiWorkspaceTab();
+    setRightTool("ai");
+  }
+
   function selectNode(id: string) {
     const node = workspace.nodes.find((item) => item.id === id);
     if (!node || node.kind === "folder") {
@@ -1461,6 +1829,7 @@ function App() {
       }
       return;
     }
+    setAiTabActive(false);
     setWorkspace((current) => ({ ...current, selectedNodeId: id }));
     setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
   }
@@ -1470,18 +1839,20 @@ function App() {
     const node = workspace.nodes.find((item) => item.id === id);
     setWorkspace((current) => ({ ...current, selectedNodeId: id }));
     if (opensInWorkspace(node)) {
+      setAiTabActive(false);
       setOpenTabIds((current) => current.includes(id) ? current : [...current, id]);
     }
   }
 
   function handleProjectCreated(nextWorkspace: WorkspaceState, nextProjectPath: string) {
     hydrated.current = true;
-    captureSyncedMarkdown(nextWorkspace.noteMarkdown);
+    acceptLoadedWorkspace(nextWorkspace);
     setProjectPath(nextProjectPath);
     setWorkspace(nextWorkspace);
     setTreeSelectedId(nextWorkspace.selectedNodeId);
     setOpenTabIds(pruneOpenTabs([nextWorkspace.selectedNodeId], nextWorkspace.nodes));
     setLockedNodeIds([]);
+    closeAiWorkspaceTab();
     setQuery("");
     setSyncStatus(navigator.onLine ? "saved" : "offline");
   }
@@ -1491,6 +1862,7 @@ function App() {
     setGitInfo(emptyGitInfo);
     setGitError(null);
     setCommitMessage("");
+    setGitMenu(null);
     setIndexedSearchResults(null);
   }
 
@@ -1532,62 +1904,46 @@ function App() {
   }
 
   async function commitWorkspace() {
-    if (!commitMessage.trim()) return;
+    if (!commitMessage.trim() || gitLoading) return;
     setGitLoading(true);
     setGitError(null);
     try {
+      await saveChainRef.current;
       await saveWorkspace({ ...workspace, lastSavedAt: new Date().toISOString() });
       const info = await commitAll(commitMessage);
       setGitInfo(info);
       setCommitMessage("");
+      setGitMenu(null);
     } catch (error) {
-      setGitError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setGitError(message);
+      if (gitMenu === "commit") window.alert(message);
     } finally {
       setGitLoading(false);
     }
   }
 
-  async function importPdfFile() {
-    if (!("__TAURI_INTERNALS__" in window) || !projectPath) {
-      window.alert("请先在桌面应用中创建或打开本地项目");
-      return;
-    }
+  async function runRemoteGit(command: () => Promise<GitRepositoryInfo>) {
+    if (!projectPath || !gitInfo.isRepository || gitLoading) return;
+    setGitLoading(true);
+    setGitError(null);
     try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selectedPath = await open({
-        multiple: false,
-        directory: false,
-        title: "导入 PDF",
-        filters: [{ name: "PDF", extensions: ["pdf"] }],
-      });
-      if (typeof selectedPath !== "string" || !selectedPath) return;
-      const imported = await importPdf(selectedPath);
-      const parentId = parentIdForTreeTarget(workspace.nodes, treeSelectedId, selected);
-      const node: ContentNode = {
-        id: imported.id,
-        parentId,
-        kind: "file",
-        title: imported.title,
-        fileType: "PDF",
-        size: formatFileSize(imported.size),
-        updatedAt: "刚刚",
-        localPath: imported.relativePath,
-        contentHash: imported.contentHash,
-        lfsTracked: imported.lfsTracked,
-      };
-      setWorkspace((current) => ({
-        ...current,
-        selectedNodeId: node.id,
-        nodes: [...current.nodes, node],
-      }));
-      setTreeSelectedId(node.id);
-      setOpenTabIds((current) => [...current, node.id]);
-      window.setTimeout(() => { void refreshGitStatus(); }, 650);
+      const info = await command();
+      setGitInfo(info);
+      setGitError(info.error ?? null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setGitError(message);
       window.alert(message);
+    } finally {
+      setGitLoading(false);
     }
+  }
+
+  function toggleGitMenu(next: "commit" | "history") {
+    const opening = gitMenu === next ? null : next;
+    setGitMenu(opening);
+    if (opening === "history") void refreshGitStatus();
   }
 
   function closeTab(id: string) {
@@ -1598,6 +1954,39 @@ function App() {
       }
       return next;
     });
+  }
+
+  function closeTabsAround(targetId: string, side: TabCloseSide) {
+    const ordered = [
+      ...openTabs.map((tab) => tab.id),
+      ...(aiWorkspaceMode ? [AI_CHAT_TAB_ID] : []),
+    ];
+    const index = ordered.indexOf(targetId);
+    if (index < 0) return;
+    const closing = side === "left"
+      ? ordered.slice(0, index)
+      : side === "right"
+        ? ordered.slice(index + 1)
+        : ordered.filter((id) => id !== targetId);
+    if (closing.length === 0) return;
+
+    const closingSet = new Set(closing);
+    const viewingId = aiWorkspaceMode && aiTabActive ? AI_CHAT_TAB_ID : workspace.selectedNodeId;
+    const activeClosed = closingSet.has(viewingId);
+    if (closingSet.has(AI_CHAT_TAB_ID)) closeAiWorkspaceTab();
+    setOpenTabIds((current) => current.filter((id) => !closingSet.has(id)));
+
+    if (activeClosed && targetId === AI_CHAT_TAB_ID) {
+      setAiTabActive(true);
+    } else if (activeClosed) {
+      setAiTabActive(false);
+      setWorkspace((value) => ({ ...value, selectedNodeId: targetId }));
+    }
+
+    if (closingSet.has(workspace.selectedNodeId) && !(activeClosed && targetId !== AI_CHAT_TAB_ID)) {
+      const remaining = openTabs.map((tab) => tab.id).filter((id) => !closingSet.has(id));
+      setWorkspace((value) => ({ ...value, selectedNodeId: remaining.at(-1) ?? treeSelectedId }));
+    }
   }
 
   function beginSidebarResize(event: React.PointerEvent<HTMLDivElement>) {
@@ -1619,14 +2008,38 @@ function App() {
     window.addEventListener("pointerup", handleUp);
   }
 
+  function beginRightPanelResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rightPanelWidth;
+    document.body.classList.add("is-resizing");
+    const handleMove = (moveEvent: PointerEvent) => setRightPanelWidth(Math.min(680, Math.max(300, startWidth + startX - moveEvent.clientX)));
+    const handleUp = () => {
+      document.body.classList.remove("is-resizing");
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  }
+
   function updateDocument(pageId: string, markdown: string) {
-    setWorkspace((current) => {
-      const existing = current.noteMarkdown[pageId] ?? "";
-      if (markdownEquals(existing, markdown)) return current;
-      return {
-        ...current,
-        noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
-      };
+    const existing = workspaceRef.current.noteMarkdown[pageId] ?? "";
+    if (markdownEquals(existing, markdown)) return;
+    let bumped = false;
+    startTransition(() => {
+      setWorkspace((current) => {
+        const latest = current.noteMarkdown[pageId] ?? "";
+        if (markdownEquals(latest, markdown)) return current;
+        if (!bumped) {
+          noteEditEpochRef.current[pageId] = (noteEditEpochRef.current[pageId] ?? 0) + 1;
+          bumped = true;
+        }
+        return {
+          ...current,
+          noteMarkdown: { ...current.noteMarkdown, [pageId]: markdown },
+        };
+      });
     });
   }
 
@@ -1669,15 +2082,23 @@ function App() {
           fileIdentity: created.fileIdentity ?? undefined,
           updatedAt: "刚刚",
         };
-        setWorkspace((current) => ({
-          ...current,
-          selectedNodeId: node.id,
-          nodes: [...current.nodes, node],
-          noteMarkdown: node.kind === "file" ? { ...current.noteMarkdown, [node.id]: "" } : current.noteMarkdown,
-        }));
-        if (opensInWorkspace(node)) setOpenTabIds((current) => [...current, node.id]);
-        setTreeSelectedId(node.id);
-        setPendingRenameId(node.id);
+        let createdId = node.id;
+        setWorkspace((current) => {
+          createdId = uniqueWorkspaceNodeId(node.id, current.nodes);
+          const nextNode = createdId === node.id ? node : { ...node, id: createdId };
+          return {
+            ...current,
+            selectedNodeId: nextNode.id,
+            nodes: insertWorkspaceNode(current.nodes, nextNode),
+            noteMarkdown: nextNode.kind === "file" ? { ...current.noteMarkdown, [nextNode.id]: "" } : current.noteMarkdown,
+          };
+        });
+        if (opensInWorkspace(node)) {
+          setAiTabActive(false);
+          setOpenTabIds((current) => [...current, createdId]);
+        }
+        setTreeSelectedId(createdId);
+        setPendingRenameId(createdId);
         setPrimaryLeftTool("project");
       } catch (error) {
         window.alert(error instanceof Error ? error.message : String(error));
@@ -1704,10 +2125,13 @@ function App() {
     setWorkspace((current) => ({
       ...current,
       selectedNodeId: id,
-      nodes: [...current.nodes, node],
+      nodes: insertWorkspaceNode(current.nodes, node),
       noteMarkdown: kind === "page" ? { ...current.noteMarkdown, [id]: "" } : current.noteMarkdown,
     }));
-    if (opensInWorkspace(node)) setOpenTabIds((current) => [...current, id]);
+    if (opensInWorkspace(node)) {
+      setAiTabActive(false);
+      setOpenTabIds((current) => [...current, id]);
+    }
     setTreeSelectedId(id);
     setPendingRenameId(id);
     setPrimaryLeftTool("project");
@@ -1903,6 +2327,7 @@ function App() {
     <div className="app-shell" style={{
       "--sidebar-width": primaryLeftTool || secondaryLeftTool ? `${sidebarWidth}px` : "0px",
       "--secondary-bottom-panel-height": secondaryBottomTool ? "220px" : "0px",
+      "--right-panel-width": rightTool ? `${rightPanelWidth}px` : "0px",
     } as React.CSSProperties}>
       <header className="window-titlebar" aria-label="窗口标题栏">
         <div className="titlebar-main" data-tauri-drag-region>
@@ -1922,8 +2347,78 @@ function App() {
             }}
           />
           <div className={`toolbar-sync ${syncStatus}`}><Cloud size={13} /><span>{syncCopy}</span></div>
-          <button className="toolbar-secondary" onClick={() => void importPdfFile()}><FileUp size={13} /> 导入 PDF</button>
-          <button className="toolbar-primary" onClick={createPage}><Plus size={13} /> 新建页面</button>
+          <div className="toolbar-git-actions" ref={gitToolbarRef}>
+            <button
+              className="toolbar-icon"
+              type="button"
+              aria-label="拉取"
+              title={gitInfo.isRepository ? "拉取" : "当前项目尚未启用 Git"}
+              disabled={!gitInfo.isRepository || gitLoading}
+              onClick={() => void runRemoteGit(gitPull)}
+            >
+              <ArrowDownToLine size={14} />
+            </button>
+            <button
+              className="toolbar-icon"
+              type="button"
+              aria-label="推送"
+              title={gitInfo.isRepository ? "推送" : "当前项目尚未启用 Git"}
+              disabled={!gitInfo.isRepository || gitLoading}
+              onClick={() => void runRemoteGit(gitPush)}
+            >
+              <ArrowUpFromLine size={14} />
+            </button>
+            <button
+              className={`toolbar-icon ${gitMenu === "commit" ? "active" : ""}`}
+              type="button"
+              aria-label="提交"
+              aria-expanded={gitMenu === "commit"}
+              title={gitInfo.isRepository ? "提交" : "当前项目尚未启用 Git"}
+              disabled={!gitInfo.isRepository || gitLoading}
+              onClick={() => toggleGitMenu("commit")}
+            >
+              <GitCommitHorizontal size={14} />
+            </button>
+            <button
+              className={`toolbar-icon ${gitMenu === "history" ? "active" : ""}`}
+              type="button"
+              aria-label="查看 Git 历史"
+              aria-expanded={gitMenu === "history"}
+              title="查看 Git 历史"
+              onClick={() => toggleGitMenu("history")}
+            >
+              <History size={14} />
+            </button>
+            {gitMenu === "commit" && (
+              <form className="toolbar-git-popover toolbar-git-commit" onSubmit={(event) => { event.preventDefault(); void commitWorkspace(); }}>
+                <input
+                  value={commitMessage}
+                  onChange={(event) => setCommitMessage(event.target.value)}
+                  placeholder="提交说明"
+                  disabled={gitLoading}
+                  autoFocus
+                />
+                <button type="submit" aria-label="确认提交" title="提交" disabled={gitLoading || !commitMessage.trim()}>
+                  <GitCommitHorizontal size={14} />
+                </button>
+              </form>
+            )}
+            {gitMenu === "history" && (
+              <div className="toolbar-git-popover toolbar-git-history" role="dialog" aria-label="Git 历史">
+                {gitError && <p className="git-error" role="alert">{gitError}</p>}
+                <div className="git-history-list">
+                  {gitInfo.history.map((commit) => (
+                    <div key={commit.id}>
+                      <code>{commit.shortId}</code>
+                      <span><b>{commit.subject}</b><small>{commit.author} · {commit.authoredAt.slice(0, 10)}</small></span>
+                    </div>
+                  ))}
+                  {gitInfo.isRepository && gitInfo.history.length === 0 && <small>还没有提交记录</small>}
+                  {!gitInfo.isRepository && <small>{gitInfo.gitAvailable ? "当前项目尚未启用 Git" : "未检测到 Git"}</small>}
+                </div>
+              </div>
+            )}
+          </div>
           <button className="toolbar-icon" aria-label="更多操作"><MoreHorizontal size={15} /></button>
         </div>
       </header>
@@ -1999,19 +2494,34 @@ function App() {
       <main className="workspace">
         <WorkspaceTabBar
           tabs={openTabs}
-          activeId={hasSelectedContent ? selected.id : ""}
+          activeId={aiWorkspaceMode && aiTabActive ? AI_CHAT_TAB_ID : hasSelectedContent ? selected.id : ""}
           onSelect={selectNode}
           onClose={closeTab}
+          onCloseAround={closeTabsAround}
           onOpenInfo={() => toggleRightTool("notifications")}
+          aiTab={aiWorkspaceMode ? { active: aiTabActive, onSelect: () => setAiTabActive(true), onClose: closeAiWorkspaceTab } : undefined}
         />
 
-        <div className={`workspace-content ${rightTool ? "with-details" : ""}`}>
+        <div className="workspace-content">
           <section className="workspace-canvas" role="tabpanel" onContextMenu={(event) => event.preventDefault()}>
-            {hasSelectedContent ? (
+            {aiWorkspaceMode && (
+              <div className="ai-workspace-pane" hidden={!aiTabActive}>
+                <AiChatPanel
+                  projectPath={projectPath}
+                  pageTitle={selected.title}
+                  pageMarkdown={workspace.noteMarkdown[selected.id] ?? ""}
+                  onMinimize={() => { closeAiWorkspaceTab(); setRightTool(null); }}
+                  onToggleWorkspace={restoreAiToSidebar}
+                  workspaceMode
+                />
+              </div>
+            )}
+            {!(aiWorkspaceMode && aiTabActive) && (hasSelectedContent ? (
               isMarkdownDocument(selected) ? (
               <NoteView
                 node={selected}
                 workspace={workspace}
+                projectPath={projectPath}
                 readOnly={selectedReadOnly}
                 bookmarks={(workspace.bookmarks ?? []).filter((bookmark) => bookmark.pageId === selected.id)}
                 onToggleBookmark={(line, label) => toggleMarkdownBookmark(selected.id, line, label)}
@@ -2028,12 +2538,15 @@ function App() {
                 onOpenFolder={() => { void openFolderDialog(); }}
                 onOpenSearch={() => setBottomTool("search")}
               />
-            )}
+            ))}
           </section>
 
+        </div>
+
           {rightTool && (
-            <aside className="details-panel">
-              <div className="details-header"><strong>{rightTool === "notifications" ? "Notification" : rightTool === "references" ? "Referenced Files" : "AI Chat"}</strong><button onClick={() => setRightTool(null)} aria-label="关闭辅助面板"><X size={16} /></button></div>
+            <aside className={`details-panel ${rightTool === "ai" ? "ai-details-panel" : ""}`}>
+              <div className="details-panel-resizer" onPointerDown={beginRightPanelResize} title="拖拽调整宽度" />
+              {rightTool !== "ai" && <div className="details-header"><strong>{rightTool === "notifications" ? "Notification" : "Referenced Files"}</strong><button onClick={() => setRightTool(null)} aria-label="关闭辅助面板"><X size={16} /></button></div>}
               {rightTool === "notifications" && (
                 <div className="notification-list">
                   <div className="notification-item">
@@ -2072,16 +2585,16 @@ function App() {
                 </div>
               )}
               {rightTool === "ai" && (
-                <div className="ai-card expanded">
-                  <span className="ai-icon"><Sparkles size={17} /></span>
-                  <div><strong>AI Chat</strong><p>围绕当前页面继续写作、总结内容，或在工作空间中查找答案。</p></div>
-                  <div className="ai-suggestions"><button>总结当前页面</button><button>提取待办事项</button><button>寻找相关内容</button></div>
-                  <button className="ai-start">开始对话</button>
-                </div>
+                aiWorkspaceMode ? <AiHistoryManager projectPath={projectPath} onOpenChat={openAiWorkspaceTab} /> : <AiChatPanel
+                  projectPath={projectPath}
+                  pageTitle={selected.title}
+                  pageMarkdown={workspace.noteMarkdown[selected.id] ?? ""}
+                  onMinimize={() => setRightTool(null)}
+                  onToggleWorkspace={openAiWorkspaceTab}
+                />
               )}
             </aside>
           )}
-        </div>
 
         {bottomTool && (
           <section className="bottom-panel" aria-label="底部工具窗口">

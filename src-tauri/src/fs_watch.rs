@@ -3,7 +3,6 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
-    thread,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -12,7 +11,7 @@ use crate::{app_settings, workspace_store};
 
 pub const WORKSPACE_TREE_CHANGED_EVENT: &str = "workspace-tree-changed";
 const DEBOUNCE: Duration = Duration::from_millis(300);
-const QUIET_PERIOD: Duration = Duration::from_millis(500);
+const QUIET_PERIOD: Duration = Duration::from_millis(1500);
 
 pub struct FsWatchState {
     inner: Mutex<WatchInner>,
@@ -22,8 +21,6 @@ struct WatchInner {
     debouncer: Option<Debouncer<notify::RecommendedWatcher>>,
     project_path: Option<PathBuf>,
     quiet_until: Instant,
-    generation: u64,
-    pending: bool,
 }
 
 impl Default for FsWatchState {
@@ -33,8 +30,6 @@ impl Default for FsWatchState {
                 debouncer: None,
                 project_path: None,
                 quiet_until: Instant::now(),
-                generation: 0,
-                pending: false,
             }),
         }
     }
@@ -53,11 +48,14 @@ pub fn start_watching(app: &AppHandle, project_path: &Path) -> Result<(), String
     let mut inner = state.inner.lock().map_err(|error| error.to_string())?;
     inner.debouncer = Some(debouncer);
     inner.project_path = Some(project_path.to_path_buf());
-    inner.pending = false;
-    inner.generation = inner.generation.wrapping_add(1);
+    inner.quiet_until = Instant::now();
     Ok(())
 }
 
+/// Ignore filesystem events caused by our own writes.
+///
+/// A follow-up full project scan used to land on the UI thread shortly after
+/// every autosave, which is the hitch after a newline or a window switch.
 pub fn quiet_watch(app: &AppHandle) {
     let Some(state) = app.try_state::<FsWatchState>() else {
         return;
@@ -66,31 +64,6 @@ pub fn quiet_watch(app: &AppHandle) {
         return;
     };
     inner.quiet_until = Instant::now() + QUIET_PERIOD;
-    inner.generation = inner.generation.wrapping_add(1);
-    let generation = inner.generation;
-    drop(inner);
-
-    let app = app.clone();
-    thread::spawn(move || {
-        thread::sleep(QUIET_PERIOD + Duration::from_millis(50));
-        let Some(state) = app.try_state::<FsWatchState>() else {
-            return;
-        };
-        let Ok(mut inner) = state.inner.lock() else {
-            return;
-        };
-        if inner.generation != generation {
-            return;
-        }
-        let pending = std::mem::take(&mut inner.pending);
-        let project = inner.project_path.clone();
-        drop(inner);
-        if pending {
-            if let Some(project) = project {
-                emit_workspace_tree(&app, &project);
-            }
-        }
-    });
 }
 
 fn handle_watch_events(app: &AppHandle, result: DebounceEventResult) {
@@ -104,7 +77,7 @@ fn handle_watch_events(app: &AppHandle, result: DebounceEventResult) {
     let Some(state) = app.try_state::<FsWatchState>() else {
         return;
     };
-    let Ok(mut inner) = state.inner.lock() else {
+    let Ok(inner) = state.inner.lock() else {
         return;
     };
     let Some(project) = inner.project_path.clone() else {
@@ -117,10 +90,8 @@ fn handle_watch_events(app: &AppHandle, result: DebounceEventResult) {
         return;
     }
     if Instant::now() < inner.quiet_until {
-        inner.pending = true;
         return;
     }
-    inner.pending = false;
     drop(inner);
     emit_workspace_tree(app, &project);
 }

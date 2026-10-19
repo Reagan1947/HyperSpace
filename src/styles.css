@@ -110,6 +110,7 @@ body.is-resizing { cursor: col-resize; user-select: none; }
   grid-column: 1 / -1;
   grid-row: 1;
   position: relative;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   background: var(--color-bg-panel);
@@ -153,6 +154,20 @@ body.is-resizing { cursor: col-resize; user-select: none; }
 .toolbar-primary:hover { background: var(--color-accent-hover); }
 .toolbar-secondary { position: relative; z-index: 1; height: 22px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid var(--color-border); border-radius: 5px; background: #fff; color: #625e58; cursor: pointer; font-size: 11px; }
 .toolbar-secondary:hover { border-color: #b8b3ab; background: var(--color-bg-hover); }
+.toolbar-icon:disabled { opacity: .38; cursor: default; }
+.toolbar-icon:disabled:hover { background: #f2f2f2; color: #837f78; }
+.toolbar-icon.active { background: var(--color-bg-hover); color: var(--color-text); }
+.toolbar-git-actions { position: relative; z-index: 2; display: flex; align-items: center; gap: 2px; }
+.toolbar-git-popover { position: absolute; z-index: 80; top: calc(100% + 6px); right: 0; width: 300px; padding: 8px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-canvas); box-shadow: 0 8px 24px #38332c24, 0 2px 6px #38332c12; }
+.toolbar-git-commit { display: flex; align-items: center; gap: 6px; }
+.toolbar-git-commit input { min-width: 0; height: 26px; flex: 1; padding: 0 8px; border: 1px solid var(--color-border); border-radius: 5px; outline: none; background: #fff; color: var(--color-text); font-size: 12px; }
+.toolbar-git-commit input:focus { border-color: var(--color-accent); }
+.toolbar-git-commit button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 1px solid var(--color-accent); border-radius: 5px; background: var(--color-accent); color: #fff; cursor: pointer; }
+.toolbar-git-commit button:hover { background: var(--color-accent-hover); }
+.toolbar-git-commit button:disabled { opacity: .5; cursor: default; }
+.toolbar-git-history { display: flex; flex-direction: column; gap: 6px; max-height: 320px; }
+.toolbar-git-history .git-history-list { min-height: 0; overflow: auto; }
+.toolbar-git-history .git-error { border: 0; border-radius: 4px; }
 
 .activity-rail { grid-row: 2; display: flex; min-height: 0; flex-direction: column; background: #f2f2f2; overflow: hidden; }
 .activity-rail.left { grid-column: 1; grid-row: 2 / 4; border-right: 1px solid var(--color-border); }
@@ -323,11 +338,30 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .sidebar-resizer { position: absolute; z-index: 5; top: 0; right: -3px; bottom: 0; width: 6px; cursor: col-resize; }
 .sidebar-resizer:hover::after, body.is-resizing .sidebar-resizer::after { content: ""; position: absolute; inset: 0 2px; background: var(--color-accent); }
 
-.workspace { grid-column: 3; grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-canvas); }
-.workspace-tabs { position: relative; height: var(--workspace-tabbar-height); display: flex; flex: 0 0 auto; align-items: stretch; border-bottom: 1px solid var(--color-border); background: var(--color-bg-panel); overflow: visible; }
-.workspace-tabs-measure { position: absolute; top: 0; left: 0; height: 0; display: flex; align-items: stretch; overflow: hidden; visibility: hidden; pointer-events: none; }
-.workspace-tabs-measure .document-tab { height: var(--workspace-tabbar-height); }
+.workspace { grid-column: 3; grid-row: 2; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--right-panel-width, 0px); grid-template-rows: var(--workspace-tabbar-height) minmax(0, 1fr); background: var(--color-bg-canvas); }
+.workspace-tabs { grid-column: 1; grid-row: 1; position: relative; height: var(--workspace-tabbar-height); display: flex; align-items: stretch; border-bottom: 1px solid var(--color-border); background: var(--color-bg-panel); overflow: visible; }
+.workspace-tabs-measure { position: absolute; inset: 0 auto 0 0; width: 100%; display: flex; align-items: stretch; overflow: hidden; visibility: hidden; pointer-events: none; z-index: -1; }
+.workspace-tabs-measure .document-tab { height: var(--workspace-tabbar-height); flex: 0 0 auto; }
+.workspace-tabs-list { display: flex; align-items: stretch; min-width: 0; height: 100%; overflow: hidden; }
+.workspace-tabs:not(.is-overflowing) .workspace-tabs-list { flex: 0 1 auto; }
+.workspace-tabs.is-overflowing .workspace-tabs-list {
+  flex: 1 1 auto;
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 20px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 20px), transparent 100%);
+}
+.workspace-tabs-trailing { display: flex; align-items: stretch; flex: 0 0 auto; height: 100%; position: relative; z-index: 2; padding-right: 2px; background: var(--color-bg-panel); }
+.workspace-tabs-trailing.is-covering::before {
+  content: "";
+  position: absolute;
+  left: -20px;
+  top: 0;
+  bottom: 0;
+  width: 20px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgb(242 242 242 / 0), var(--color-bg-panel) 72%);
+}
 .document-tab { min-width: 96px; max-width: 240px; height: 100%; display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: 0; border-right: 1px solid var(--color-border); background: transparent; color: #716c65; cursor: pointer; }
+.document-tab.ai-workspace-tab { flex: 0 0 auto; }
 .document-tab:hover { background: #ece9e4; }
 .document-tab.active { border-bottom: 2px solid #9ca7b8; background: var(--color-bg-canvas); color: #292723; }
 .workspace:focus-within .document-tab.active { border-bottom-color: var(--color-accent); }
@@ -338,7 +372,7 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .document-tab > i svg { width: 11px; height: 11px; }
 .document-tab > i:hover { background: #e2dfd9; color: #39352f; }
 .tab-overflow { position: relative; flex: 0 0 auto; height: 100%; }
-.tab-overflow-button { width: 28px; height: 100%; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--color-icon); cursor: pointer; }
+.tab-overflow-button { width: 22px; height: 100%; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--color-icon); cursor: pointer; }
 .tab-overflow-button:hover, .tab-overflow-button.open { background: var(--color-bg-hover); color: var(--color-text); }
 .tab-overflow-menu { position: absolute; z-index: 40; top: calc(100% + 4px); right: 0; min-width: 180px; max-width: min(280px, 70vw); max-height: min(320px, 50vh); padding: 5px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-canvas); box-shadow: 0 8px 24px #38332c24, 0 2px 6px #38332c12; overflow: auto; }
 .tab-overflow-menu > button { width: 100%; min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: #514d47; cursor: pointer; text-align: left; font-size: 12px; }
@@ -350,10 +384,12 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .tab-overflow-menu > button:hover > i, .tab-overflow-menu > button > i:hover { opacity: 1; }
 .tab-overflow-menu > button > i:hover { background: #e2dfd9; color: #39352f; }
 .tabbar-spacer { min-width: 20px; flex: 1; }
-.tabbar-action { width: 36px; height: 100%; display: grid; flex: 0 0 auto; place-items: center; padding: 0; border: 0; background: transparent; color: var(--color-icon); cursor: pointer; }
+.tabbar-action { width: 24px; height: 100%; display: grid; flex: 0 0 auto; place-items: center; padding: 0; border: 0; background: transparent; color: var(--color-icon); cursor: pointer; }
 .tabbar-action:hover { background: var(--color-bg-hover); color: var(--color-text); }
-.workspace-content { min-width: 0; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); overflow: hidden; }
-.workspace-content.with-details { grid-template-columns: minmax(0, 1fr) 300px; }
+.tab-context-menu { width: 152px; }
+.tab-context-menu button:disabled { opacity: .4; cursor: default; }
+.tree-context-menu.is-pointer.tab-context-menu button:disabled:hover { background: transparent; color: #514d47; }
+.workspace-content { grid-column: 1; grid-row: 2; width: 100%; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); overflow: hidden; }
 .workspace-canvas { min-width: 0; min-height: 0; background: var(--color-bg-content); overflow: auto; }
 .blank-workspace {
   width: 100%;
@@ -503,7 +539,9 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 
 /* Full-bleed so the editor toolbar can span the window; the text column is
    centred further down, on the editing surface itself. */
-.workspace-canvas:has(> .note-page) { overflow: hidden; }
+.workspace-canvas:has(> .note-page),
+.workspace-canvas:has(> .ai-workspace-pane:not([hidden])) { overflow: hidden; }
+.ai-workspace-pane { height: 100%; min-height: 0; }
 .note-page { width: 100%; height: 100%; min-height: 0; margin: 0; padding: 0; }
 .empty-view > small { color: var(--color-text-muted); font-size: 10px; }
 .mini-avatar { width: 19px; height: 19px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 50%; background: #e2d7d0; color: #5b514c; font-size: 7px; font-weight: 700; }
@@ -528,15 +566,23 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
    under .workspace-tabs rather than as part of the document.
    !important overrides Vditor's inline padding-left, which tracks the centring
    padding it puts on the editing surface — room this bar has no use for. */
-.hyperspace-vditor .vditor-toolbar { position: sticky; z-index: 8; top: 0; width: 100%; min-height: 24px; display: flex; align-items: center; flex-wrap: wrap; gap: 0; padding: 1px 8px !important; border: 0; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
+.hyperspace-vditor .vditor-toolbar { position: sticky; z-index: 8; top: 0; width: 100%; min-height: var(--menubar-height); display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 1px 8px !important; border: 0; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
 .hyperspace-vditor .vditor-toolbar__item { display: flex; flex: 0 0 auto; align-items: center; }
-.hyperspace-vditor .vditor-toolbar__item button { width: 18px; height: 18px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--color-icon); cursor: pointer; }
-.hyperspace-vditor .vditor-toolbar__item button svg { width: 13px; height: 13px; display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.hyperspace-vditor .vditor-toolbar__item button:hover { background: #dfdfdf; color: var(--color-text); }
-.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--current { background: #dfdfdf; color: var(--color-text) !important; }
-.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled { cursor: default; opacity: .38; }
-.hyperspace-vditor .vditor-toolbar__item button.vditor-menu--disabled:hover { background: transparent; color: var(--color-icon); }
-.hyperspace-vditor .vditor-toolbar__divider { width: 1px; height: 13px; margin: 0 4px; border: 0; background: var(--color-border); }
+/* 22px is the hit target. Padding plus content-box clipping paints hover and
+   the current state as a 20px chip, clear of the 4px gap. ::before is the
+   tooltip arrow, so it cannot carry this fill. */
+.hyperspace-vditor .vditor-toolbar__item > button { box-sizing: border-box; width: 22px; height: 22px; display: grid; place-items: center; padding: 1px; border: 0; border-radius: 4px; background-color: transparent; background-clip: content-box; cursor: pointer; }
+.hyperspace-vditor .vditor-toolbar__item > button svg { width: 14px; height: 14px; display: block; fill: currentColor; stroke: none; overflow: visible; }
+.hyperspace-vditor .vditor-toolbar__item > button,
+.hyperspace-vditor .vditor-toolbar__item > button:hover,
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--current,
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--disabled,
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--disabled:hover { color: #6e6e6e !important; }
+.hyperspace-vditor .vditor-toolbar__item > button:hover:not(.vditor-menu--disabled),
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--current:not(.vditor-menu--disabled) { background-color: #dfdfdf; }
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--disabled { cursor: default; opacity: .38; }
+.hyperspace-vditor .vditor-toolbar__item > button.vditor-menu--disabled:hover { background-color: transparent; }
+.hyperspace-vditor .vditor-toolbar__divider { width: 1px; height: 16px; margin: 0; border: 0; background: var(--color-border); }
 /* The divider in front of undo becomes the gap that splits the bar: authoring
    tools stay left, the view controls after it are pushed right. */
 .hyperspace-vditor .vditor-toolbar__divider:has(+ .vditor-toolbar__item > button[data-type="undo"]) { min-width: 16px; flex: 1; margin: 0; background: transparent; }
@@ -592,7 +638,7 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 /* Keep the toolbar outside the scrolling viewport. The full-width content
    container owns the scrollbar so it starts below the toolbar and sits flush
    with the right activity rail, not against the centred text column. */
-.hyperspace-vditor .vditor-content { position: absolute; top: 24px; right: 0; bottom: 0; left: 0; width: auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.hyperspace-vditor .vditor-content { position: absolute; top: var(--menubar-height); right: 0; bottom: 0; left: 0; width: auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
 .hyperspace-vditor .vditor-content::-webkit-scrollbar-thumb {
   border-right: 0;
   border-radius: 999px 0 0 999px;
@@ -601,7 +647,13 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-wysiwyg,
 .hyperspace-vditor .vditor-preview,
 .hyperspace-vditor .vditor-sv { min-height: 100%; overflow: visible; align-self: flex-start; }
-.hyperspace-vditor .vditor-ir { position: relative; }
+.hyperspace-vditor .vditor-ir {
+  position: relative;
+  min-height: 100%;
+  background:
+    linear-gradient(#d4d4d4, #d4d4d4) calc(var(--editor-line-gutter) - 1px) 0 / 1px 100% no-repeat,
+    linear-gradient(#f2f2f2, #f2f2f2) 0 0 / var(--editor-line-gutter) 100% no-repeat;
+}
 .hyperspace-vditor textarea.vditor-sv {
   position: relative;
   padding-left: 64px !important;
@@ -622,10 +674,14 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
   pointer-events: none;
   user-select: none;
 }
-/* IR keeps numbers on the canvas’s left edge; the centred measure stays untouched. */
+/* IR reserves a separate rail for line numbers; text is centred in the space
+   between that rail and the scrollbar, even when side panels narrow it. */
 .hyperspace-vditor__line-numbers--ir {
   left: 0;
+  top: 0;
+  bottom: 0;
   width: var(--editor-line-gutter);
+  min-height: 100%;
   padding: 0;
   background: #f2f2f2;
   white-space: normal;
@@ -649,12 +705,12 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
   font-size: 11px;
   line-height: 1;
 }
-.hyperspace-vditor__line-numbers-list > span.has-bookmark::before {
+.hyperspace-vditor__line-numbers-list > span.has-bookmark::after {
   content: "";
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
   flex: 0 0 auto;
-  margin-right: 3px;
+  margin-left: 3px;
   background: url("./assets/icons/bookmark-flag.svg") center / contain no-repeat;
 }
 .markdown-context-menu {
@@ -758,6 +814,7 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-ir,
 .hyperspace-vditor .vditor-wysiwyg,
 .hyperspace-vditor .vditor-preview { max-width: none !important; padding: 0 !important; }
+.hyperspace-vditor .vditor-ir { min-width: 0; padding-left: var(--editor-line-gutter) !important; }
 .hyperspace-vditor .vditor-reset { width: 100%; max-width: var(--editor-column) !important; height: auto !important; margin: 0 auto; padding: 30px var(--editor-gutter) 80px !important; overflow: visible !important; color: #1d1d1f; font-family: inherit; font-size: 16px; line-height: 1.75; letter-spacing: 0.01em; line-break: strict; overflow-wrap: break-word; word-break: normal; }
 /* Vditor zeroes the margin on the editable surfaces from a longer selector, and
    sets height: 100% + overflow: auto — that would put the scrollbar on the
@@ -780,7 +837,7 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-reset h5,
 .hyperspace-vditor .vditor-reset h6 { padding: 0; border: 0; color: var(--color-accent); scroll-margin-top: 1.5rem; }
 .hyperspace-vditor .vditor-reset h1 { margin: 0 0 1.25rem; font-size: 2rem; line-height: 1.25; font-weight: 600; letter-spacing: -0.02em; }
-.hyperspace-vditor .vditor-reset h2 { margin: 3rem 0 1rem; padding-top: 1.5rem; border-top: 1px solid #e0e0e0; font-size: 1.5rem; line-height: 1.35; font-weight: 600; letter-spacing: -0.02em; }
+.hyperspace-vditor .vditor-reset h2 { margin: 3rem 0 1rem; font-size: 1.5rem; line-height: 1.35; font-weight: 600; letter-spacing: -0.02em; }
 .hyperspace-vditor .vditor-reset h3 { margin: 2rem 0 0.75rem; font-size: 1.25rem; line-height: 1.35; font-weight: 600; }
 .hyperspace-vditor .vditor-reset h4 { margin: 1.8rem 0 0.65rem; font-size: 1.06rem; line-height: 1.35; font-weight: 650; }
 .hyperspace-vditor .vditor-reset h5,
@@ -815,14 +872,23 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-reset li > ul,
 .hyperspace-vditor .vditor-reset li > ol { margin: 0.25rem 0 0.4rem; }
 .hyperspace-vditor .vditor-reset li p { margin: 0.35rem 0; }
-.hyperspace-vditor .vditor-reset ul:has(> .vditor-task) { padding-left: 0.2rem; list-style: none; }
+/* Keep task items in normal flow. `display: flex` on a contenteditable <li>
+   makes WebKit paint the caret at the start of the box — in front of the
+   checkbox — after the toolbar inserts `- [ ]`. Hang the input in the list
+   gutter the same way Vditor and GFM do. */
+.hyperspace-vditor .vditor-reset ul:has(> .vditor-task) { padding-left: 1.6rem; list-style: none; }
 .hyperspace-vditor .vditor-reset li.vditor-task { list-style: none; }
-.hyperspace-vditor .vditor-reset .vditor-task { display: flex; gap: 0.5rem; align-items: flex-start; }
-.hyperspace-vditor .vditor-reset .vditor-task input { margin: 0.45em 0 0; }
+.hyperspace-vditor .vditor-reset .vditor-task input { margin: 0.35em 0.45em 0.25em -1.4em; vertical-align: text-top; }
+.hyperspace-vditor .vditor-reset li.vditor-task > p:first-of-type { display: inline; margin: 0; }
 .hyperspace-vditor .vditor-reset a { color: var(--color-accent); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
 .hyperspace-vditor .vditor-reset a:hover { color: var(--color-accent-hover); }
-.hyperspace-vditor .vditor-reset img { max-width: 100%; height: auto; display: block; margin: 0.4rem 0 1.2rem; border-radius: 10px; }
-.hyperspace-vditor .vditor-reset hr { height: 0; margin: 2rem 0; padding: 0; border: 0; border-top: 1px solid #e0e0e0; background: transparent; }
+.hyperspace-vditor .vditor-ir__node[data-type="img"] { display: inline-block; max-width: 100%; vertical-align: top; }
+.hyperspace-vditor .vditor-reset img { max-width: 100%; width: auto; height: auto; display: block; margin: 0.4rem 0 1.2rem; border-radius: 10px; }
+/* Vditor IR paints hr as inline-block so the caret can sit on that line.
+   Inside a task item the first paragraph is also inline, so the rule would
+   otherwise trail the checkbox text. Force a real block. */
+.hyperspace-vditor .vditor-reset hr,
+.hyperspace-vditor .vditor-ir hr { display: block; width: 100%; height: 0; margin: 1.1rem 0; padding: 0; border: 0; border-top: 1px solid #e0e0e0; background: transparent; }
 .hyperspace-vditor .vditor-reset kbd { padding: 2px 5px; border: 1px solid #e0e0e0; border-radius: 4px; background: #f5f5f7; box-shadow: none; color: #1d1d1f; font: 11px/1.4 var(--font-code); }
 .hyperspace-vditor .vditor-reset blockquote { margin: 1rem 0 1.35rem; padding: 1rem 1rem 0.5rem; border: 1px solid transparent; border-radius: 8px; background: #f5f5f7; color: #1d1d1f; }
 .hyperspace-vditor .vditor-reset blockquote > :last-child { margin-bottom: 0; }
@@ -869,6 +935,40 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-ir__node[data-type="code-block"]:not(.vditor-ir__node--expand)::after,
 .hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"]:not(.vditor-ir__node--expand)::before,
 .hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"]:not(.vditor-ir__node--expand)::after { content: none; }
+.hyperspace-vditor .vditor-ir__node[data-type="yaml-front-matter"],
+.hyperspace-vditor .vditor-wysiwyg__block[data-type="yaml-front-matter"] {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] pre,
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] .vditor-ir__preview,
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] .vditor-wysiwyg__preview {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] pre > code,
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] pre > code.hljs,
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] pre > code.highlight-chroma,
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] .vditor-ir__preview code,
+.hyperspace-vditor .vditor-reset pre > code[data-type="yaml-front-matter"] {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  word-wrap: break-word;
+}
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] .vditor-linenumber__rows {
+  display: none;
+}
+.hyperspace-vditor .vditor-reset [data-type="yaml-front-matter"] pre > code.vditor-linenumber {
+  padding-left: 0 !important;
+}
 /* Vditor pins the line-number column with !important padding that assumes the
    <code> keeps its own 1em inset; both ends have to be restated together. */
 .hyperspace-vditor .vditor-reset pre > code.vditor-linenumber { padding-left: 3.2em !important; }
@@ -919,8 +1019,6 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hyperspace-vditor .vditor-reset .hljs-deletion { color: #b23c3c; }
 .hyperspace-vditor .vditor-reset .hljs-emphasis { font-style: italic; }
 .hyperspace-vditor .vditor-reset .hljs-strong { font-weight: 700; }
-.hyperspace-vditor.vditor--fullscreen,
-.hyperspace-vditor .vditor--fullscreen { z-index: 200; }
 .note-page.read-only .vditor-toolbar { opacity: .72; }
 .vditor-fallback { max-width: var(--editor-column); display: flex; flex-direction: column; gap: 8px; margin: 14px auto; padding: 14px; border: 1px solid #e3c4bd; border-radius: 8px; background: #fff8f6; }
 .vditor-fallback small { color: var(--color-text-muted); }
@@ -940,7 +1038,10 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .hs-embed-card__source pre { margin: 8px 0 0; padding: 8px; border-radius: 6px; background: #fff; color: #5c5650; font: 11px/1.5 var(--font-code); white-space: pre-wrap; }
 .outline-list button { height: auto; min-height: 30px; }
 
-.details-panel { min-width: 0; height: 100%; padding: 18px 15px; border-left: 1px solid var(--color-border); background: #faf9f6; overflow-y: auto; }
+.details-panel { position: relative; grid-column: 2; grid-row: 1 / 3; min-width: 0; height: 100%; padding: 18px 15px; border-left: 1px solid var(--color-border); background: var(--color-bg-content); overflow-y: auto; }
+.details-panel.ai-details-panel { padding: 0; overflow: hidden; }
+.details-panel-resizer { position: absolute; z-index: 10; top: 0; bottom: 0; left: -3px; width: 6px; cursor: col-resize; }
+.details-panel-resizer:hover::after, body.is-resizing .details-panel-resizer::after { content: ""; position: absolute; inset: 0 2px; background: var(--color-accent); }
 .details-header { display: flex; align-items: center; margin-bottom: 18px; font-size: 12px; }
 .details-header strong { flex: 1; }
 .details-header button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #85888d; cursor: pointer; }
@@ -950,9 +1051,86 @@ body.is-tree-dragging, body.is-tree-dragging * { cursor: grabbing !important; us
 .ai-card strong { font-size: 12px; }
 .ai-card p { margin: 5px 0 11px; color: #60768a; font-size: 10px; line-height: 1.55; }
 .ai-card button { width: 100%; height: 30px; border: 0; border-radius: 5px; background: var(--color-accent); color: #fff; cursor: pointer; font-size: 10px; }
-.ai-suggestions { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
-.ai-card .ai-suggestions button { border: 1px solid #d5e5f5; background: #fff; color: #4f6578; text-align: left; padding: 0 9px; }
 .ai-card .ai-start { background: var(--color-accent); color: #fff; text-align: center; }
+.ai-empty-card { padding: 14px; border: 1px solid #d1e5fa; border-radius: 8px; background: linear-gradient(145deg, #f8fbff, #edf6ff); }
+.ai-empty-card strong { display: block; font-size: 12px; }
+.ai-empty-card p { color: #60768a; font-size: 10px; line-height: 1.55; }
+.ai-empty-card button { width: 100%; height: 32px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 5px; background: var(--color-accent); color: #fff; cursor: pointer; }
+.ai-empty-card button:disabled { opacity: .6; cursor: wait; }
+.ai-chat { position: relative; height: 100%; min-height: 0; display: flex; flex-direction: column; background: var(--color-bg-content); }
+.ai-chat-toolbar { height: var(--workspace-tabbar-height); display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 0 7px 0 12px; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
+.ai-chat-toolbar-left, .ai-chat-toolbar-actions { display: flex; align-items: center; min-width: 0; }
+.ai-chat-toolbar-left { gap: 5px; }
+.ai-chat-title-icon { width: 14px; height: 14px; display: block; flex: 0 0 auto; object-fit: contain; }
+.ai-chat-toolbar button { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-icon); cursor: pointer; }
+.ai-chat-toolbar button:hover, .ai-chat-toolbar button.active { background: var(--color-bg-hover); color: var(--color-text); }
+.ai-history-trigger { width: auto !important; display: flex !important; grid-template-columns: none !important; grid-auto-flow: column; gap: 3px; padding: 0 5px !important; color: #4a4844 !important; font-size: 11px; white-space: nowrap; }
+.ai-history-trigger span { overflow: hidden; text-overflow: ellipsis; }
+.ai-new-chat { width: auto !important; display: flex !important; grid-template-columns: none !important; grid-auto-flow: column; gap: 4px; padding: 0 6px !important; font-size: 10px; white-space: nowrap; }
+.ai-toolbar-divider { width: 1px; height: 16px; margin: 0 4px; background: var(--color-border); }
+.ai-model-row { min-height: 38px; display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--color-border-soft); color: var(--color-text-muted); font-size: 9px; }
+.ai-model-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-model-row select, .ai-settings select { min-width: 0; max-width: 58%; height: 25px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-bg-content); color: var(--color-text); font-size: 10px; }
+.ai-popover { position: absolute; z-index: 30; top: calc(var(--workspace-tabbar-height) - 1px); right: 7px; width: min(280px, calc(100% - 14px)); padding: 8px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-content); box-shadow: 0 8px 24px #38332c24; }
+.ai-popover > strong { display: block; padding: 4px 6px 8px; font-size: 11px; }
+.ai-history { max-height: 320px; overflow-y: auto; }
+.ai-popover.ai-history { right: auto; left: 7px; }
+.ai-history > button { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--color-text); cursor: pointer; text-align: left; }
+.ai-history > button:hover, .ai-history > button.active { background: var(--color-bg-hover); }
+.ai-history > button span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.ai-history > button small { color: var(--color-text-muted); font-size: 8px; }
+.ai-settings label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 10px; }
+.ai-settings p { margin: 8px 0 0; color: var(--color-text-muted); font-size: 9px; line-height: 1.45; }
+.ai-empty-card { margin: 14px; }
+.ai-account { display: flex; align-items: center; gap: 7px; padding: 0 2px 10px; color: #6d716f; font-size: 10px; }
+.ai-messages { min-height: 0; display: flex; flex: 1; flex-direction: column; gap: 9px; padding: 12px; overflow-y: auto; }
+.ai-message { max-width: 92%; padding: 9px 10px; border-radius: 8px; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-message.user { align-self: flex-end; background: var(--color-accent); color: #fff; }
+.ai-message.assistant { align-self: flex-start; border: 1px solid #e0e2e4; background: #fff; color: #46494e; }
+.ai-message.pending { color: #7f858a; }
+.ai-error { margin: 8px 0; color: #b4493e !important; font-size: 10px; line-height: 1.45; }
+.ai-editor-hint { margin: 0 12px 8px; padding: 10px 11px; border: 1px solid #e4e7ea; border-radius: 8px; background: #f7f8f9; color: var(--color-text-muted); }
+.ai-editor-hint strong { display: block; color: #3f4348; font-size: 12px; font-weight: 600; }
+.ai-editor-hint p { margin: 4px 0 0; font-size: 10px; line-height: 1.5; }
+.ai-editor-hint button { margin-top: 8px; padding: 0; border: 0; background: transparent; color: var(--color-accent); cursor: pointer; font-size: 11px; font-weight: 500; }
+.ai-editor-hint button:hover { color: var(--color-accent-hover); }
+.ai-editor-hint + .ai-composer { margin-top: 0; }
+.ai-composer { margin: 10px 12px 12px; }
+.ai-composer form { position: relative; }
+.ai-composer textarea { width: 100%; resize: none; padding: 8px 32px 32px 10px; border: 1px solid #d3d6d9; border-radius: 7px; outline: none; background: #fff; color: #383b3e; font: 11px/1.45 var(--font-ui); }
+.ai-composer.expanded textarea { min-height: 168px; }
+.ai-composer textarea:focus { border-color: #88b9e8; box-shadow: 0 0 0 2px rgba(56, 132, 205, .12); }
+.ai-composer-expand, .ai-composer-attach, .ai-composer-send { position: absolute; width: 22px; height: 22px; display: grid; place-items: center; padding: 0; border: 0; cursor: pointer; }
+.ai-composer-expand, .ai-composer-attach { border-radius: 4px; background: transparent; color: #8a8f94; }
+.ai-composer-expand { top: 8px; right: 8px; }
+.ai-composer-attach { left: 8px; bottom: 8px; }
+.ai-composer-expand:hover, .ai-composer-attach:hover { background: #f0f1f2; color: #3f4348; }
+.ai-composer-attach:disabled { opacity: .35; cursor: default; }
+.ai-composer-send { right: 8px; bottom: 8px; border-radius: 5px; background: #c4c4c4; }
+.ai-composer-send img { width: 12px; height: 12px; display: block; }
+.ai-composer-send:hover:not(:disabled) { background: #b0b0b0; }
+.ai-composer-send:disabled { opacity: .35; cursor: default; }
+.ai-composer-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; padding: 0; list-style: none; }
+.ai-composer-files li { display: flex; align-items: center; gap: 2px; max-width: 100%; height: 22px; padding: 0 3px 0 7px; border: 1px solid #dce0e4; border-radius: 4px; background: #f4f5f6; color: #4a4e53; font-size: 10px; }
+.ai-composer-files span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-composer-files button { width: 16px; height: 16px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; background: transparent; color: #8a8f94; cursor: pointer; }
+.ai-composer-files button:hover { background: #e7e9eb; color: #3f4348; }
+.ai-composer-meta { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 2px 0; }
+.ai-cursor-brand { display: flex; align-items: center; gap: 5px; color: var(--color-text-muted); font-size: 10px; }
+.ai-cursor-brand img { width: auto; height: 13px; }
+.ai-composer-meta select { max-width: 68%; height: 24px; padding: 0 22px 0 7px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-bg-content); color: var(--color-text); font-size: 10px; cursor: pointer; }
+.ai-composer-meta select:disabled { opacity: .55; cursor: wait; }
+.ai-history-manager { height: 100%; display: flex; flex-direction: column; background: var(--color-bg-content); }
+.ai-history-manager > header { height: var(--workspace-tabbar-height); display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 0 9px 0 12px; border-bottom: 1px solid var(--color-border); background: #f2f2f2; }
+.ai-history-manager > header strong { color: #4a4844; font-size: 11px; }
+.ai-history-manager > header button { height: 27px; display: flex; align-items: center; gap: 4px; padding: 0 7px; border: 0; border-radius: 4px; background: transparent; color: var(--color-icon); cursor: pointer; font-size: 10px; }
+.ai-history-manager > header button:hover { background: var(--color-bg-hover); color: var(--color-text); }
+.ai-history-manager-list { min-height: 0; padding: 8px; overflow: auto; }
+.ai-history-manager-list > button { width: 100%; min-height: 48px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; padding: 7px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text); cursor: pointer; text-align: left; }
+.ai-history-manager-list > button:hover { background: var(--color-bg-hover); }
+.ai-history-manager-list > button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.ai-history-manager-list > button small, .ai-history-manager-list > p { color: var(--color-text-muted); font-size: 9px; line-height: 1.45; }
+.ai-workspace-tab > img { width: 15px; height: 15px; flex: 0 0 auto; }
 .outline-list { display: flex; flex-direction: column; gap: 3px; }
 .outline-list > p { color: var(--color-text-muted); font-size: 11px; }
 .outline-list button { width: 100%; height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 5px; background: transparent; color: #625e58; cursor: pointer; text-align: left; }

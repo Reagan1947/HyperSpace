@@ -14,6 +14,8 @@
     "desktop:build": "tauri build"
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.31",
+    "@primer/octicons": "^19.40.0",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@xterm/addon-fit": "^0.11.0",
